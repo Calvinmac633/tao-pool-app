@@ -1,0 +1,155 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { analyzePortfolio, analyzePosition, windowStats, type PositionRow, type SnapshotRow } from "../analytics";
+import { amountsAtPrice } from "../clmm-math";
+
+const close = (a: number, b: number, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol * Math.max(1, Math.abs(b)), `${a} != ${b}`);
+
+const T0 = Date.UTC(2026, 8, 15, 12, 0, 0) / 1000; // epoch seconds
+const iso = (minutes: number) => new Date((T0 + minutes * 60) * 1000).toISOString();
+
+const position: PositionRow = {
+  positionId: "pos1",
+  poolId: "pool",
+  poolName: "TAO/USDC",
+  symbolA: "TAO",
+  symbolB: "USDC",
+  decimalsA: 0,
+  decimalsB: 0,
+  firstSeenAt: iso(0),
+  lastSeenAt: iso(0),
+  closedAt: null,
+};
+
+function row(minutes: number, o: Partial<SnapshotRow> = {}): SnapshotRow {
+  return {
+    takenAt: iso(minutes),
+    positionId: "pos1",
+    priceA: 225,
+    amountA: 0,
+    amountB: 1000,
+    usdValue: 1000,
+    feeAmountA: 0,
+    feeAmountB: 0,
+    feeUsd: 0,
+    rewardUsd: 0,
+    liquidity: null,
+    priceLower: null,
+    priceUpper: null,
+    ...o,
+  };
+}
+
+// Tracking began well before the position, so its first snapshot counts.
+const opts = (nowMinutes: number) => ({ trackingStartedAt: iso(-60), now: T0 + nowMinutes * 60 });
+
+test("fees accumulate across intervals and survive a collection", () => {
+  const rows = [
+    row(0, { feeAmountB: 0, feeUsd: 0 }),
+    row(5, { feeAmountB: 10, feeUsd: 10 }),
+    row(10, { feeAmountB: 20, feeUsd: 20 }),
+    row(15, { feeAmountB: 5, feeUsd: 5 }), // collected 20, then earned 5
+  ];
+  const r = analyzePosition(position, rows, opts(15))!;
+  close(r.analytics.lifetime.earnedUsd, 25);
+  close(r.analytics.collectedUsd, 20);
+  assert.equal(r.analytics.preExisting, false);
+  close(r.analytics.lastUncollectedUsd, 5);
+});
+
+test("a pre-existing position excludes fees of unknown age", () => {
+  const rows = [row(0, { feeAmountB: 7, feeUsd: 7 }), row(5, { feeAmountB: 9, feeUsd: 9 })];
+  const r = analyzePosition(position, rows, { trackingStartedAt: iso(0), now: T0 + 300 })!;
+  assert.equal(r.analytics.preExisting, true);
+  close(r.analytics.baselineUncollectedUsd, 7);
+  close(r.analytics.lifetime.earnedUsd, 2);
+});
+
+test("APR annualises earnings over time-weighted capital", () => {
+  // $1 per hour on $1000 for 24 hours -> 24/1000 * 365 = 876%
+  const rows = Array.from({ length: 25 }, (_, h) => row(h * 60, { feeAmountB: h, feeUsd: h }));
+  const r = analyzePosition(position, rows, opts(24 * 60))!;
+  const w = r.analytics.windows["24h"];
+  close(w.earnedUsd, 24);
+  close(w.avgCapitalUsd, 1000);
+  close(w.coveredSeconds, 24 * 3600);
+  close(w.apr!, 8.76);
+  // The 1h window sees only the last hour.
+  close(r.analytics.windows["1h"].earnedUsd, 1);
+  close(r.analytics.windows["1h"].apr!, 8.76);
+});
+
+test("windowStats pro-rates an interval that straddles the window edge", () => {
+  const ivs = [{ start: 0, end: 100, earnedUsd: 10, capitalUsd: 500 }];
+  const w = windowStats(ivs, 50, 100);
+  close(w.earnedUsd, 5);
+  close(w.avgCapitalUsd, 500);
+  close(w.coveredSeconds, 50);
+});
+
+test("a liquidity change adjusts the entry baseline instead of showing as IL", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a1 = amountsAtPrice(6000, range, 225, 0, 0); // 100 A, 30000 B
+  const a2 = amountsAtPrice(12000, range, 225, 0, 0); // doubled
+  const rows = [
+    row(0, { ...a1, usdValue: a1.amountA * 225 + a1.amountB, liquidity: "6000", ...range }),
+    row(5, { ...a2, usdValue: a2.amountA * 225 + a2.amountB, liquidity: "12000", ...range }),
+  ];
+  const r = analyzePosition(position, rows, opts(5))!.analytics;
+  assert.equal(r.entry.adjustments, 1);
+  close(r.entry.amountA, 200);
+  close(r.entry.amountB, 60000);
+  close(r.ilUsd, 0, 1e-6);
+});
+
+test("projections at the bounds match the closed-form IL", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a = amountsAtPrice(6000, range, 225, 0, 0);
+  const rows = [row(0, { ...a, usdValue: a.amountA * 225 + a.amountB, liquidity: "6000", ...range })];
+  const r = analyzePosition(position, rows, opts(0))!.analytics;
+  assert.ok(r.projections);
+  close(r.projections.current.ilUsd, 0);
+  close(r.projections.upper.positionUsd, 60000);
+  close(r.projections.upper.hodlUsd, 70000);
+  close(r.projections.upper.ilUsd, -10000);
+  close(r.projections.lower.positionUsd, 30000);
+  close(r.projections.lower.ilUsd, -10000);
+  assert.equal(r.inRange, true);
+});
+
+test("net performance is IL plus fees earned", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a0 = amountsAtPrice(6000, range, 225, 0, 0);
+  const a1 = amountsAtPrice(6000, range, 400, 0, 0); // price ran to the top
+  const rows = [
+    row(0, { ...a0, usdValue: a0.amountA * 225 + a0.amountB, liquidity: "6000", ...range }),
+    row(5, { ...a1, priceA: 400, usdValue: a1.amountA * 400 + a1.amountB, liquidity: "6000", ...range, feeAmountB: 50, feeUsd: 50 }),
+  ];
+  const r = analyzePosition(position, rows, opts(5))!.analytics;
+  close(r.ilUsd, -10000);
+  close(r.lifetime.earnedUsd, 50);
+  close(r.netUsd, -9950);
+});
+
+test("a closed position measures lifetime up to its last snapshot", () => {
+  const rows = [row(0), row(60, { feeAmountB: 2, feeUsd: 2 })];
+  const closed = { ...position, closedAt: iso(65) };
+  const r = analyzePosition(closed, rows, opts(24 * 60))!.analytics;
+  close(r.lifetime.coveredSeconds, 3600);
+  close(r.lifetime.earnedUsd, 2);
+  close(r.lifetime.apr!, (2 / 1000) * (365 * 24)); // 2/1000 per hour, annualised
+  assert.deepEqual(Object.keys(r.windows), []);
+});
+
+test("portfolio sums capital and earnings across positions", () => {
+  const rowsA = [row(0), row(60, { feeAmountB: 1, feeUsd: 1 })];
+  const rowsB = [row(0, { positionId: "pos2" }), row(60, { positionId: "pos2", feeAmountB: 3, feeUsd: 3 })];
+  const a = analyzePosition(position, rowsA, opts(60))!;
+  const b = analyzePosition({ ...position, positionId: "pos2" }, rowsB, opts(60))!;
+  const p = analyzePortfolio([a.intervals, b.intervals], [...rowsA, ...rowsB], T0 + 3600);
+  close(p.currentCapitalUsd, 2000);
+  close(p.windows["1h"].earnedUsd, 4);
+  close(p.windows["1h"].avgCapitalUsd, 2000);
+  close(p.windows["1h"].apr!, (4 / 2000) * (365 * 24));
+  close(p.sinceStart.earnedUsd, 4);
+});

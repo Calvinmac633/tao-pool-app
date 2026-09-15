@@ -1,4 +1,6 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import { Connection, PublicKey, type AccountInfo } from "@solana/web3.js";
+import { decodePersonalPosition } from "./clmm-account";
+import { isInRange, tickToPrice } from "./clmm-math";
 import type { Position } from "./types";
 
 // Raydium concentrated-liquidity (CLMM) program on mainnet.
@@ -15,8 +17,8 @@ type RaydiumPositionResponse = {
   poolInfo?: {
     id?: string;
     price?: number;
-    mintA?: { symbol?: string };
-    mintB?: { symbol?: string };
+    mintA?: { symbol?: string; decimals?: number };
+    mintB?: { symbol?: string; decimals?: number };
   };
   positionInfo?: {
     usdValue?: number;
@@ -98,14 +100,16 @@ function derivePositionPda(nftMint: PublicKey): PublicKey {
  * wallet: the Raydium API does no verification of its own and will return
  * data for any position id it's given.
  */
-async function filterToRealPositions(connection: Connection, pdas: PublicKey[]): Promise<PublicKey[]> {
-  const verified: PublicKey[] = [];
+type VerifiedPosition = { pda: PublicKey; account: AccountInfo<Buffer> };
+
+async function filterToRealPositions(connection: Connection, pdas: PublicKey[]): Promise<VerifiedPosition[]> {
+  const verified: VerifiedPosition[] = [];
   for (let i = 0; i < pdas.length; i += GET_MULTIPLE_ACCOUNTS_LIMIT) {
     const chunk = pdas.slice(i, i + GET_MULTIPLE_ACCOUNTS_LIMIT);
     const accounts = await connection.getMultipleAccountsInfo(chunk);
     accounts.forEach((account, idx) => {
       if (account && account.owner.equals(CLMM_PROGRAM_ID)) {
-        verified.push(chunk[idx]);
+        verified.push({ pda: chunk[idx], account });
       }
     });
   }
@@ -113,8 +117,11 @@ async function filterToRealPositions(connection: Connection, pdas: PublicKey[]):
 }
 
 /** Fetch one position from Raydium and shape it. Returns null if closed/empty. */
-async function fetchPosition(positionPda: PublicKey): Promise<FetchedPosition | null> {
-  const positionId = positionPda.toBase58();
+async function fetchPosition({ pda, account }: VerifiedPosition): Promise<FetchedPosition | null> {
+  const positionId = pda.toBase58();
+  // Tick range and liquidity come from the on-chain account; the API does
+  // not expose them. They drive range display and impermanent-loss maths.
+  const onChain = decodePersonalPosition(account.data);
   const res = await fetch(`${RAYDIUM_POSITION_API}?id=${positionId}`, { cache: "no-store" });
   if (!res.ok) {
     throw new Error(`Raydium API returned ${res.status} for position ${positionId}`);
@@ -128,6 +135,13 @@ async function fetchPosition(positionPda: PublicKey): Promise<FetchedPosition | 
   const symbolA = data.poolInfo?.mintA?.symbol ?? "?";
   const symbolB = data.poolInfo?.mintB?.symbol ?? "?";
   const fee = data.positionInfo?.unclaimedFee;
+  const decimalsA = data.poolInfo?.mintA?.decimals ?? 0;
+  const decimalsB = data.poolInfo?.mintB?.decimals ?? 0;
+  const priceA = data.poolInfo?.price ?? 0;
+  const range = {
+    priceLower: tickToPrice(onChain.tickLower, decimalsA, decimalsB),
+    priceUpper: tickToPrice(onChain.tickUpper, decimalsA, decimalsB),
+  };
 
   // amountA/amountB are already human-readable decimals; usdValue is taken
   // as-is from the endpoint rather than recomputed from prices.
@@ -141,11 +155,19 @@ async function fetchPosition(positionPda: PublicKey): Promise<FetchedPosition | 
     symbolA,
     symbolB,
     unclaimedFeeUsd: fee?.usdValue ?? 0,
-    priceA: data.poolInfo?.price ?? 0,
+    priceA,
     unclaimedFeeAmountA: fee?.amountA ?? 0,
     unclaimedFeeAmountB: fee?.amountB ?? 0,
     unclaimedRewardUsd: fee?.usdRewardValue ?? 0,
     rewards: Array.isArray(fee?.reward) ? fee.reward : [],
+    decimalsA,
+    decimalsB,
+    tickLower: onChain.tickLower,
+    tickUpper: onChain.tickUpper,
+    liquidity: onChain.liquidity.toString(),
+    priceLower: range.priceLower,
+    priceUpper: range.priceUpper,
+    inRange: isInRange(range, priceA),
   };
   return { position, raw: data };
 }
@@ -168,7 +190,7 @@ export async function fetchWalletPositions(wallet: PublicKey): Promise<WalletPos
     if (result.status === "fulfilled") {
       if (result.value) positions.push(result.value);
     } else {
-      failedPositionIds.push(verified[idx].toBase58());
+      failedPositionIds.push(verified[idx].pda.toBase58());
       console.error("Failed to fetch Raydium position:", result.reason);
     }
   });

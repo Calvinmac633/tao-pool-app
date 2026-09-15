@@ -1,6 +1,6 @@
 # Raydium CLMM Position Viewer
 
-Enter a Solana wallet address and see its open Raydium concentrated-liquidity (CLMM) positions: pool name, USD value, and uncollected fees. A background tracker snapshots one configured wallet on a timer so fee earnings and APR can be computed over time.
+Enter a Solana wallet address and see its open Raydium concentrated-liquidity (CLMM) positions: pool name, price range, USD value, and uncollected fees. A background tracker snapshots one configured wallet every few minutes, and from those snapshots the app computes fees earned, rolling APRs, impermanent loss (current and projected at the range bounds), net performance, and a closed-position history.
 
 ## Setup
 
@@ -15,7 +15,7 @@ Edit `.env.local`:
 SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=<your Helius key>
 SOLANA_RPC_API_KEY=unused
 TRACKED_WALLET=<wallet to snapshot on a timer>
-SNAPSHOT_INTERVAL_MINUTES=15
+SNAPSHOT_INTERVAL_MINUTES=5
 ```
 
 - `SOLANA_RPC_URL` must be an RPC that allows `getTokenAccountsByOwner`. Helius's free tier does; Tatum's free tier does not. If your provider authenticates with an `x-api-key` header instead of the URL, put the key in `SOLANA_RPC_API_KEY`.
@@ -26,7 +26,8 @@ All variables are read only on the server, so keys never reach the browser. `.en
 ## Run
 
 ```bash
-npm run dev
+npm run dev     # app + tracker on http://localhost:3000
+npm test        # unit tests for the CLMM maths and analytics
 ```
 
 Open [http://localhost:3000](http://localhost:3000). The tracked wallet is prefilled.
@@ -50,13 +51,26 @@ Snapshots live in a SQLite file at `data/tracker.db` (via `@libsql/client`). Thr
 - `snapshots`: one row per open position per successful run. Stores token amounts, uncollected fee amounts, the token price at the time, emission rewards, and the full raw API payload.
 - `positions`: every position ever seen, with first-seen, last-seen, and closed-at timestamps.
 
+Each snapshot also records the position's tick range and liquidity, decoded from the on-chain position account (`lib/clmm-account.ts`), since the Raydium API does not expose them.
+
 Fees are stored as token amounts plus price so USD figures can be recomputed later without drifting with the current price.
+
+### Analytics (`lib/analytics.ts`, `lib/clmm-math.ts`)
+
+Everything below is computed from stored snapshots, so it only covers time the tracker was running.
+
+- **Fees earned**: the increase in uncollected fees between consecutive snapshots. A decrease means fees were collected; the previous amount is banked as collected and the new amount counts as earned since. Fees are valued at the price when they were observed.
+- **APR**: fees earned in a window divided by the time-weighted average position value in that window, annualised. Windows are 1h, 6h, 24h, 7d per position, and 24h, 7d, and since tracking for the whole wallet. When a window is only partly covered by data, the UI says how much data backs the number.
+- **Impermanent loss**: position value minus the value of the entry tokens held unchanged. The entry is the first snapshot's tokens, adjusted when liquidity changes (adds or partial withdrawals). Because a CLMM position's composition is a pure function of liquidity, range and price, IL is also projected exactly at the lower and upper range bounds. Fees are never included in projections.
+- **Net**: impermanent loss plus fees earned.
+- **Pre-existing positions**: a position already open when tracking began has uncollected fees of unknown age at its first snapshot. Those are excluded, and its figures are labelled "since tracking" rather than "since open".
 
 ## API
 
 - `GET /api/positions?wallet=<address>`: open positions and total value.
 - `GET /api/snapshot`: tracker status.
 - `POST /api/snapshot`: take a snapshot of the tracked wallet now.
+- `GET /api/analytics?wallet=<address>`: fee, APR, IL and portfolio analytics from stored snapshots. Defaults to the tracked wallet.
 
 ## Deploy
 

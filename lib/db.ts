@@ -55,14 +55,30 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS snapshots_wallet_time ON snapshots (wallet, taken_at)`,
 ];
 
-// Cached on globalThis so dev-mode hot reloads reuse one connection.
-const globalForDb = globalThis as unknown as { __trackerDb?: Promise<Client> };
+// Columns added after the first release. Applied with ALTER TABLE when
+// missing so existing databases upgrade in place.
+const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
+  ["positions", "decimals_a", "INTEGER"],
+  ["positions", "decimals_b", "INTEGER"],
+  ["snapshots", "tick_lower", "INTEGER"],
+  ["snapshots", "tick_upper", "INTEGER"],
+  ["snapshots", "liquidity", "TEXT"],
+  ["snapshots", "price_lower", "REAL"],
+  ["snapshots", "price_upper", "REAL"],
+  ["snapshots", "in_range", "INTEGER"],
+];
+
+// Cached on globalThis so dev-mode hot reloads reuse one connection. The key
+// carries a version so a schema change re-runs migrations after a reload.
+const SCHEMA_VERSION = 2;
+const globalForDb = globalThis as unknown as Record<string, Promise<Client> | undefined>;
+const DB_KEY = `__trackerDb_v${SCHEMA_VERSION}`;
 
 export function getDb(): Promise<Client> {
-  if (!globalForDb.__trackerDb) {
-    globalForDb.__trackerDb = openDb();
+  if (!globalForDb[DB_KEY]) {
+    globalForDb[DB_KEY] = openDb();
   }
-  return globalForDb.__trackerDb;
+  return globalForDb[DB_KEY]!;
 }
 
 async function openDb(): Promise<Client> {
@@ -73,6 +89,12 @@ async function openDb(): Promise<Client> {
   const client = createClient({ url, authToken: process.env.TRACKER_DB_AUTH_TOKEN });
   for (const statement of SCHEMA) {
     await client.execute(statement);
+  }
+  for (const [table, column, type] of ADDED_COLUMNS) {
+    const info = await client.execute(`PRAGMA table_info(${table})`);
+    if (!info.rows.some((r) => r.name === column)) {
+      await client.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+    }
   }
   return client;
 }

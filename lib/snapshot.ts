@@ -57,23 +57,27 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
       sql: `INSERT INTO snapshots (
               run_id, taken_at, wallet, position_id, pool_id, price_a,
               amount_a, amount_b, usd_value, fee_amount_a, fee_amount_b, fee_usd,
-              reward_usd, rewards_json, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              reward_usd, rewards_json, raw_json,
+              tick_lower, tick_upper, liquidity, price_lower, price_upper, in_range
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         runId, takenAt, wallet, p.positionId, p.poolId, p.priceA,
         p.amountA, p.amountB, p.usdValue, p.unclaimedFeeAmountA, p.unclaimedFeeAmountB, p.unclaimedFeeUsd,
         p.unclaimedRewardUsd, JSON.stringify(p.rewards), JSON.stringify(raw),
+        p.tickLower, p.tickUpper, p.liquidity, p.priceLower, p.priceUpper, p.inRange ? 1 : 0,
       ],
     });
     statements.push({
       sql: `INSERT INTO positions (
               position_id, wallet, pool_id, pool_name, symbol_a, symbol_b,
-              first_seen_at, last_seen_at, closed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+              first_seen_at, last_seen_at, closed_at, decimals_a, decimals_b
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
             ON CONFLICT (position_id) DO UPDATE SET
               last_seen_at = excluded.last_seen_at,
-              closed_at = NULL`,
-      args: [p.positionId, wallet, p.poolId, p.poolName, p.symbolA, p.symbolB, takenAt, takenAt],
+              closed_at = NULL,
+              decimals_a = excluded.decimals_a,
+              decimals_b = excluded.decimals_b`,
+      args: [p.positionId, wallet, p.poolId, p.poolName, p.symbolA, p.symbolB, takenAt, takenAt, p.decimalsA, p.decimalsB],
     });
   }
 

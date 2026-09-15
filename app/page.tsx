@@ -1,14 +1,9 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import type { Position, PositionsResponse, TrackingStatus } from "@/lib/types";
-
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
+import type { Position, PositionsResponse, TrackingStatus, WalletAnalytics } from "@/lib/types";
+import { ClosedPositionsTable, OpenPositionCards, PortfolioPanel } from "./analytics-panels";
+import { formatAgo, formatDate, price, usd } from "./format";
 
 const NETWORK_ERROR = "Couldn't reach the network. Try again.";
 
@@ -22,6 +17,15 @@ async function loadTrackingStatus(): Promise<TrackingStatus | null> {
   }
 }
 
+async function loadAnalytics(wallet: string): Promise<WalletAnalytics | null> {
+  try {
+    const res = await fetch(`/api/analytics?wallet=${encodeURIComponent(wallet)}`);
+    return res.ok ? ((await res.json()) as WalletAnalytics) : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function Home() {
   const [wallet, setWallet] = useState("");
   const [loading, setLoading] = useState(false);
@@ -29,6 +33,7 @@ export default function Home() {
   const [result, setResult] = useState<PositionsResponse | null>(null);
   const [loadedWallet, setLoadedWallet] = useState<string | null>(null);
   const [tracking, setTracking] = useState<TrackingStatus | null>(null);
+  const [analytics, setAnalytics] = useState<WalletAnalytics | null>(null);
 
   const applyTracking = useCallback((status: TrackingStatus | null) => {
     if (!status) return;
@@ -54,6 +59,12 @@ export default function Home() {
     };
   }, [applyTracking]);
 
+  const isTrackedWallet = !!tracking?.trackedWallet && loadedWallet === tracking.trackedWallet;
+
+  const refreshAnalytics = useCallback(async (address: string) => {
+    setAnalytics(await loadAnalytics(address));
+  }, []);
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const address = wallet.trim();
@@ -63,6 +74,7 @@ export default function Home() {
     setError(null);
     setResult(null);
     setLoadedWallet(null);
+    setAnalytics(null);
     try {
       const res = await fetch(`/api/positions?wallet=${encodeURIComponent(address)}`);
       const body = await res.json().catch(() => null);
@@ -72,14 +84,15 @@ export default function Home() {
       }
       setResult(body as PositionsResponse);
       setLoadedWallet(address);
+      if (tracking?.trackedWallet === address) {
+        await refreshAnalytics(address);
+      }
     } catch {
       setError(NETWORK_ERROR);
     } finally {
       setLoading(false);
     }
   }
-
-  const isTrackedWallet = !!tracking?.trackedWallet && loadedWallet === tracking.trackedWallet;
 
   return (
     <main className="mx-auto w-full max-w-[900px] px-6 py-12">
@@ -118,17 +131,32 @@ export default function Home() {
           </p>
         )}
 
-        {result && result.positions.length > 0 && <Results data={result} />}
+        {result && result.positions.length > 0 && <Results data={result} analytics={analytics} />}
 
         {result && isTrackedWallet && tracking && (
-          <TrackingLine status={tracking} onRefresh={refreshTracking} />
+          <TrackingLine
+            status={tracking}
+            onRefresh={async () => {
+              await refreshTracking();
+              if (loadedWallet) await refreshAnalytics(loadedWallet);
+            }}
+          />
         )}
       </section>
+
+      {analytics && (
+        <>
+          <PortfolioPanel data={analytics} />
+          <OpenPositionCards positions={analytics.open} asOf={analytics.asOf} />
+          <ClosedPositionsTable positions={analytics.closed} />
+        </>
+      )}
     </main>
   );
 }
 
-function Results({ data }: { data: PositionsResponse }) {
+function Results({ data, analytics }: { data: PositionsResponse; analytics: WalletAnalytics | null }) {
+  const byId = new Map(analytics?.open.map((a) => [a.positionId, a]) ?? []);
   return (
     <div>
       <div className="overflow-x-auto">
@@ -137,25 +165,40 @@ function Results({ data }: { data: PositionsResponse }) {
             <tr className="border-b border-neutral-300 text-left text-neutral-600 dark:border-neutral-700 dark:text-neutral-400">
               <th className="py-2 pr-4 font-medium">Pool</th>
               <th className="py-2 pr-4 text-right font-medium">Value (USD)</th>
-              <th className="py-2 text-right font-medium">Uncollected fees (USD)</th>
+              <th className="py-2 pr-4 text-right font-medium">Uncollected fees (USD)</th>
+              {analytics && <th className="py-2 text-right font-medium">APR (24h)</th>}
             </tr>
           </thead>
           <tbody>
-            {data.positions.map((p: Position) => (
-              <tr key={p.positionId} className="border-b border-neutral-200 dark:border-neutral-800">
-                <td className="py-2 pr-4">
-                  <div>{p.poolName}</div>
-                  <div className="font-mono text-xs text-neutral-500">{p.positionId}</div>
-                </td>
-                <td className="py-2 pr-4 text-right tabular-nums">{usd.format(p.usdValue)}</td>
-                <td className="py-2 text-right tabular-nums">{usd.format(p.unclaimedFeeUsd)}</td>
-              </tr>
-            ))}
+            {data.positions.map((p: Position) => {
+              const a = byId.get(p.positionId);
+              const apr24 = a?.windows["24h"];
+              return (
+                <tr key={p.positionId} className="border-b border-neutral-200 dark:border-neutral-800">
+                  <td className="py-2 pr-4">
+                    <div>
+                      {p.poolName}{" "}
+                      <span className="text-xs text-neutral-500">
+                        {price(p.priceLower)} – {price(p.priceUpper)} · {p.inRange ? "in range" : "out of range"}
+                      </span>
+                    </div>
+                    <div className="font-mono text-xs text-neutral-500">{p.positionId}</div>
+                  </td>
+                  <td className="py-2 pr-4 text-right tabular-nums">{usd(p.usdValue)}</td>
+                  <td className="py-2 pr-4 text-right tabular-nums">{usd(p.unclaimedFeeUsd)}</td>
+                  {analytics && (
+                    <td className="py-2 text-right tabular-nums">
+                      {apr24 && apr24.apr != null && apr24.coveredSeconds >= 600 ? `${(apr24.apr * 100).toFixed(0)}%` : "—"}
+                    </td>
+                  )}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
       <p className="mt-4 text-right text-lg font-semibold tabular-nums">
-        Total: {usd.format(data.totalUsdValue)}
+        Total: {usd(data.totalUsdValue)}
       </p>
     </div>
   );
@@ -204,19 +247,4 @@ function TrackingLine({ status, onRefresh }: { status: TrackingStatus; onRefresh
       {message && <span>{message}</span>}
     </div>
   );
-}
-
-function formatDate(iso: string | null): string {
-  if (!iso) return "—";
-  return new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
-}
-
-function formatAgo(iso: string | null): string {
-  if (!iso) return "—";
-  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `${hours} h ago`;
-  return `${Math.round(hours / 24)} d ago`;
 }
