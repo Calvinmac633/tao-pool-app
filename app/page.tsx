@@ -1,7 +1,7 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import type { Position, PositionsResponse } from "./api/positions/route";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import type { Position, PositionsResponse, TrackingStatus } from "@/lib/types";
 
 const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -10,11 +10,49 @@ const usd = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 2,
 });
 
+const NETWORK_ERROR = "Couldn't reach the network. Try again.";
+
+async function loadTrackingStatus(): Promise<TrackingStatus | null> {
+  try {
+    const res = await fetch("/api/snapshot");
+    return res.ok ? ((await res.json()) as TrackingStatus) : null;
+  } catch {
+    // Tracking status is informational; ignore failures.
+    return null;
+  }
+}
+
 export default function Home() {
   const [wallet, setWallet] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<PositionsResponse | null>(null);
+  const [loadedWallet, setLoadedWallet] = useState<string | null>(null);
+  const [tracking, setTracking] = useState<TrackingStatus | null>(null);
+
+  const applyTracking = useCallback((status: TrackingStatus | null) => {
+    if (!status) return;
+    setTracking(status);
+    // Prefill the tracked wallet for convenience if the input is still empty.
+    const tracked = status.trackedWallet;
+    if (tracked) setWallet((current) => current || tracked);
+  }, []);
+
+  const refreshTracking = useCallback(
+    () => loadTrackingStatus().then(applyTracking),
+    [applyTracking],
+  );
+
+  // Load tracking status on mount.
+  useEffect(() => {
+    let cancelled = false;
+    loadTrackingStatus().then((status) => {
+      if (!cancelled) applyTracking(status);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [applyTracking]);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -24,20 +62,24 @@ export default function Home() {
     setLoading(true);
     setError(null);
     setResult(null);
+    setLoadedWallet(null);
     try {
       const res = await fetch(`/api/positions?wallet=${encodeURIComponent(address)}`);
       const body = await res.json().catch(() => null);
       if (!res.ok) {
-        setError(body?.error ?? "Couldn't reach the network. Try again.");
+        setError(body?.error ?? NETWORK_ERROR);
         return;
       }
       setResult(body as PositionsResponse);
+      setLoadedWallet(address);
     } catch {
-      setError("Couldn't reach the network. Try again.");
+      setError(NETWORK_ERROR);
     } finally {
       setLoading(false);
     }
   }
+
+  const isTrackedWallet = !!tracking?.trackedWallet && loadedWallet === tracking.trackedWallet;
 
   return (
     <main className="mx-auto w-full max-w-[900px] px-6 py-12">
@@ -77,6 +119,10 @@ export default function Home() {
         )}
 
         {result && result.positions.length > 0 && <Results data={result} />}
+
+        {result && isTrackedWallet && tracking && (
+          <TrackingLine status={tracking} onRefresh={refreshTracking} />
+        )}
       </section>
     </main>
   );
@@ -113,4 +159,64 @@ function Results({ data }: { data: PositionsResponse }) {
       </p>
     </div>
   );
+}
+
+/** Small status line for the wallet that the background tracker is snapshotting. */
+function TrackingLine({ status, onRefresh }: { status: TrackingStatus; onRefresh: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function snapshotNow() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/snapshot", { method: "POST" });
+      const body = await res.json().catch(() => null);
+      setMessage(res.ok ? `Snapshot saved (${body.positionsFound} positions).` : body?.error ?? NETWORK_ERROR);
+      await onRefresh();
+    } catch {
+      setMessage(NETWORK_ERROR);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const summary =
+    status.runs === 0
+      ? "No snapshots recorded yet."
+      : `Tracking since ${formatDate(status.firstRunAt)} · ${status.runs} snapshot${status.runs === 1 ? "" : "s"} · last ${formatAgo(status.lastRunAt)}`;
+
+  return (
+    <div className="mt-6 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-neutral-200 pt-4 text-xs text-neutral-500 dark:border-neutral-800">
+      <span>{summary}</span>
+      <span>· every {status.intervalMinutes} min</span>
+      <button
+        type="button"
+        onClick={snapshotNow}
+        disabled={busy}
+        className="rounded border border-neutral-300 px-2 py-0.5 text-xs disabled:opacity-50 dark:border-neutral-700"
+      >
+        {busy ? "Saving…" : "Snapshot now"}
+      </button>
+      {status.lastStatus === "failed" && (
+        <span className="text-red-600 dark:text-red-400">Last snapshot failed.</span>
+      )}
+      {message && <span>{message}</span>}
+    </div>
+  );
+}
+
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" });
+}
+
+function formatAgo(iso: string | null): string {
+  if (!iso) return "—";
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours} h ago`;
+  return `${Math.round(hours / 24)} d ago`;
 }
