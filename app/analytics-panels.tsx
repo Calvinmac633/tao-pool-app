@@ -107,7 +107,8 @@ function PositionCard({ p }: { p: PositionAnalytics }) {
           <div className="font-mono text-xs text-neutral-500">{p.positionId}</div>
         </div>
         <div className="text-xs text-neutral-500">
-          {p.preExisting ? "Open before tracking began" : `Opened ${formatDate(p.openedAt)}`} · {formatDuration(p.lifetime.coveredSeconds)} tracked
+          {p.openedAtKnown ? `Opened ${formatDate(p.openedAt)}` : `First seen ${formatDate(p.openedAt)}`}
+          {p.preExisting ? " · fees before tracking excluded" : ""} · {formatDuration(p.lifetime.coveredSeconds)} tracked
         </div>
       </div>
 
@@ -151,7 +152,8 @@ function PositionCard({ p }: { p: PositionAnalytics }) {
       {p.projections && (
         <div className="mt-4">
           <div className="text-xs text-neutral-500">
-            Impermanent loss versus holding the entry tokens ({amount(p.entry.amountA)} {p.symbolA} + {amount(p.entry.amountB, 2)} {p.symbolB}
+            Impermanent loss versus holding the entry tokens ({amount(p.entry.amountA)} {p.symbolA} + {amount(p.entry.amountB, 2)} {p.symbolB},{" "}
+            {p.entry.source === "chain" ? "from the open transaction" : "from the first snapshot"}
             {p.entry.adjustments > 0 ? `, adjusted for ${p.entry.adjustments} liquidity change${p.entry.adjustments > 1 ? "s" : ""}` : ""}).
             Fees are not included in the projections.
           </div>

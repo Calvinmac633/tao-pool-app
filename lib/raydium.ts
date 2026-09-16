@@ -17,8 +17,8 @@ type RaydiumPositionResponse = {
   poolInfo?: {
     id?: string;
     price?: number;
-    mintA?: { symbol?: string; decimals?: number };
-    mintB?: { symbol?: string; decimals?: number };
+    mintA?: { symbol?: string; decimals?: number; address?: string };
+    mintB?: { symbol?: string; decimals?: number; address?: string };
   };
   positionInfo?: {
     usdValue?: number;
@@ -162,6 +162,8 @@ async function fetchPosition({ pda, account }: VerifiedPosition): Promise<Fetche
     rewards: Array.isArray(fee?.reward) ? fee.reward : [],
     decimalsA,
     decimalsB,
+    mintA: data.poolInfo?.mintA?.address ?? "",
+    mintB: data.poolInfo?.mintB?.address ?? "",
     tickLower: onChain.tickLower,
     tickUpper: onChain.tickUpper,
     liquidity: onChain.liquidity.toString(),

@@ -60,6 +60,14 @@ const SCHEMA = [
 const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["positions", "decimals_a", "INTEGER"],
   ["positions", "decimals_b", "INTEGER"],
+  ["positions", "mint_a", "TEXT"],
+  ["positions", "mint_b", "TEXT"],
+  // Filled from the position's open transaction (lib/position-history.ts).
+  ["positions", "opened_at", "TEXT"],
+  ["positions", "open_signature", "TEXT"],
+  ["positions", "entry_amount_a", "REAL"],
+  ["positions", "entry_amount_b", "REAL"],
+  ["positions", "history_attempts", "INTEGER"],
   ["snapshots", "tick_lower", "INTEGER"],
   ["snapshots", "tick_upper", "INTEGER"],
   ["snapshots", "liquidity", "TEXT"],
@@ -70,7 +78,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
 
 // Cached on globalThis so dev-mode hot reloads reuse one connection. The key
 // carries a version so a schema change re-runs migrations after a reload.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const globalForDb = globalThis as unknown as Record<string, Promise<Client> | undefined>;
 const DB_KEY = `__trackerDb_v${SCHEMA_VERSION}`;
 

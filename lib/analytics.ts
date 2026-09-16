@@ -33,6 +33,9 @@ export type PositionRow = {
   firstSeenAt: string;
   lastSeenAt: string;
   closedAt: string | null;
+  openedAt: string | null; // from the open transaction, when found
+  entryAmountA: number | null; // deposited at open, when found
+  entryAmountB: number | null;
 };
 
 export const WINDOWS: Record<string, number> = {
@@ -117,7 +120,35 @@ export function windowStats(intervals: Interval[], from: number, to: number): Wi
 type AnalyzeOptions = {
   trackingStartedAt: string; // first successful run for the wallet
   now: number; // epoch seconds
+  runTimes?: number[]; // epoch seconds of every successful run for the wallet, ascending
+  intervalSeconds?: number; // configured snapshot interval
 };
+
+const DEFAULT_INTERVAL_SECONDS = 300;
+const RUN_TOLERANCE_SECONDS = 60;
+
+/**
+ * Decide how old the fees showing at a position's first snapshot are.
+ * Returns the time they started accruing, or null if unknown (in which case
+ * they are excluded from earnings rather than inflating the rate).
+ *
+ * - Opened after the previous run (known from the open transaction): the
+ *   fees accrued since the open, so they count over that exact time.
+ * - No open time known but the previous run was recent: the position opened
+ *   somewhere in between; assume the earliest moment, which is conservative.
+ * - Anything else (first ever run, or a tracking gap the open falls inside):
+ *   unknown age.
+ */
+function feeAgeStart(position: PositionRow, firstSec: number, opts: AnalyzeOptions): number | null {
+  const prevRun = (opts.runTimes ?? []).filter((t) => t < firstSec - 1).pop();
+  if (prevRun === undefined) return null;
+  if (position.openedAt) {
+    const openedSec = toSec(position.openedAt);
+    return openedSec >= prevRun - RUN_TOLERANCE_SECONDS ? Math.min(openedSec, firstSec) : null;
+  }
+  const interval = opts.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS;
+  return firstSec - prevRun <= interval * 2 + RUN_TOLERANCE_SECONDS ? prevRun : null;
+}
 
 export type PositionAnalysis = { analytics: PositionAnalytics; intervals: Interval[] };
 
@@ -129,26 +160,34 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
   const decimalsA = position.decimalsA ?? 0;
   const decimalsB = position.decimalsB ?? 0;
 
-  // A position already open when tracking began has fees of unknown age at
-  // its first snapshot; exclude those from earnings rather than guess.
-  const preExisting = toSec(first.takenAt) <= toSec(opts.trackingStartedAt) + 1;
+  const firstSec = toSec(first.takenAt);
+
+  // Entry baseline for impermanent loss: the deposit from the open
+  // transaction when known, else the tokens at the first snapshot. Adjusted
+  // below whenever liquidity changes (an add or partial withdrawal).
+  const chainEntry = position.entryAmountA != null && position.entryAmountB != null;
+  let entry: Amounts = chainEntry
+    ? { amountA: position.entryAmountA!, amountB: position.entryAmountB! }
+    : { amountA: first.amountA, amountB: first.amountB };
+  let capitalChanges = 0;
+
+  // Fees showing at the first snapshot are only counted when we know how
+  // long they took to accrue; otherwise they'd inflate the rate.
+  const accrualStart = feeAgeStart(position, firstSec, opts);
+  const preExisting = accrualStart === null;
   const baselineUncollectedUsd = preExisting ? first.feeUsd + first.rewardUsd : 0;
 
   const intervals: Interval[] = [];
   let collectedUsd = 0;
-  if (!preExisting) {
+  if (accrualStart !== null) {
+    const entryUsd = chainEntry ? (entry.amountA * first.priceA + entry.amountB) * usdPerB(first) : first.usdValue;
     intervals.push({
-      start: toSec(first.takenAt),
-      end: toSec(first.takenAt),
+      start: accrualStart,
+      end: firstSec,
       earnedUsd: (first.feeAmountA * first.priceA + first.feeAmountB) * usdPerB(first) + first.rewardUsd,
-      capitalUsd: first.usdValue,
+      capitalUsd: entryUsd > 0 ? entryUsd : first.usdValue,
     });
   }
-
-  // Entry baseline for impermanent loss: the tokens at the first snapshot,
-  // adjusted whenever liquidity changes (an add or partial withdrawal).
-  let entry: Amounts = { amountA: first.amountA, amountB: first.amountB };
-  let capitalChanges = 0;
 
   for (let i = 1; i < rows.length; i++) {
     const prev = rows[i - 1];
@@ -166,7 +205,7 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
   }
 
   const endSec = position.closedAt ? toSec(last.takenAt) : opts.now;
-  const startSec = toSec(first.takenAt);
+  const startSec = accrualStart ?? firstSec;
   const lifetime = windowStats(intervals, startSec, endSec);
   const windows: Record<string, WindowStats> = {};
   if (!position.closedAt) {
@@ -207,7 +246,8 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     poolName: position.poolName,
     symbolA: position.symbolA,
     symbolB: position.symbolB,
-    openedAt: first.takenAt,
+    openedAt: position.openedAt ?? first.takenAt,
+    openedAtKnown: position.openedAt != null,
     closedAt: position.closedAt,
     preExisting,
     snapshots: rows.length,
@@ -219,7 +259,7 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     lastUncollectedUsd: last.feeUsd + last.rewardUsd,
     baselineUncollectedUsd,
     collectedUsd,
-    entry: { amountA: entry.amountA, amountB: entry.amountB, usd: hodlUsd, adjustments: capitalChanges },
+    entry: { amountA: entry.amountA, amountB: entry.amountB, usd: hodlUsd, adjustments: capitalChanges, source: chainEntry ? "chain" : "snapshot" },
     lifetime,
     windows,
     ilUsd,

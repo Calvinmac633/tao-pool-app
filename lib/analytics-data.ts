@@ -1,5 +1,6 @@
 import { getDb } from "./db";
 import { analyzePortfolio, analyzePosition, type Interval, type PositionRow, type SnapshotRow } from "./analytics";
+import { getIntervalMinutes } from "./snapshot";
 import type { PositionAnalytics, WalletAnalytics } from "./types";
 
 const CLOSED_LIMIT = 20;
@@ -7,7 +8,7 @@ const CLOSED_LIMIT = 20;
 /** Load snapshots for a wallet and compute all analytics. */
 export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Promise<WalletAnalytics> {
   const db = await getDb();
-  const [positionsRes, snapshotsRes, firstRunRes] = await db.batch(
+  const [positionsRes, snapshotsRes, runsRes] = await db.batch(
     [
       { sql: `SELECT * FROM positions WHERE wallet = ? ORDER BY first_seen_at`, args: [wallet] },
       {
@@ -17,7 +18,7 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
               FROM snapshots WHERE wallet = ? ORDER BY taken_at`,
         args: [wallet],
       },
-      { sql: `SELECT MIN(finished_at) AS t FROM snapshot_runs WHERE wallet = ? AND status = 'ok'`, args: [wallet] },
+      { sql: `SELECT finished_at FROM snapshot_runs WHERE wallet = ? AND status = 'ok' ORDER BY finished_at`, args: [wallet] },
     ],
     "read",
   );
@@ -33,6 +34,9 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     firstSeenAt: String(r.first_seen_at),
     lastSeenAt: String(r.last_seen_at),
     closedAt: r.closed_at == null ? null : String(r.closed_at),
+    openedAt: r.opened_at == null ? null : String(r.opened_at),
+    entryAmountA: r.entry_amount_a == null ? null : Number(r.entry_amount_a),
+    entryAmountB: r.entry_amount_b == null ? null : Number(r.entry_amount_b),
   }));
 
   const rows: SnapshotRow[] = snapshotsRes.rows.map((r) => ({
@@ -58,14 +62,16 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     byPosition.set(r.positionId, list);
   }
 
-  const trackingStartedAt = (firstRunRes.rows[0]?.t as string | null) ?? rows[0]?.takenAt ?? new Date(nowMs).toISOString();
+  const runTimes = runsRes.rows.map((r) => new Date(String(r.finished_at)).getTime() / 1000);
+  const trackingStartedAt = runsRes.rows.length ? String(runsRes.rows[0].finished_at) : (rows[0]?.takenAt ?? new Date(nowMs).toISOString());
   const now = nowMs / 1000;
+  const analyzeOpts = { trackingStartedAt, now, runTimes, intervalSeconds: getIntervalMinutes() * 60 };
 
   const open: PositionAnalytics[] = [];
   const closed: PositionAnalytics[] = [];
   const intervals: Interval[][] = [];
   for (const p of positions) {
-    const result = analyzePosition(p, byPosition.get(p.positionId) ?? [], { trackingStartedAt, now });
+    const result = analyzePosition(p, byPosition.get(p.positionId) ?? [], analyzeOpts);
     if (!result) continue;
     intervals.push(result.intervals);
     (p.closedAt ? closed : open).push(result.analytics);

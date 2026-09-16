@@ -18,6 +18,8 @@ export type Position = {
   rewards: unknown[]; // raw reward entries from the API; none of the tracked pools emit yet
   decimalsA: number;
   decimalsB: number;
+  mintA: string;
+  mintB: string;
   // Range and liquidity decoded from the on-chain position account.
   tickLower: number;
   tickUpper: number;
@@ -39,6 +41,7 @@ export type SnapshotSummary = {
   positionsFound: number;
   positionsFailed: number;
   positionsClosed: number;
+  historyLookups: number; // open-transaction lookups that succeeded this run
 };
 
 export type TrackingStatus = {
@@ -77,9 +80,10 @@ export type PositionAnalytics = {
   poolName: string;
   symbolA: string;
   symbolB: string;
-  openedAt: string; // first snapshot (tracking start for pre-existing positions)
+  openedAt: string; // from the open transaction when known, else the first snapshot
+  openedAtKnown: boolean;
   closedAt: string | null;
-  preExisting: boolean; // already open when tracking began; figures are "since tracking"
+  preExisting: boolean; // fees at first sight were of unknown age and are excluded; figures are "since tracking"
   snapshots: number;
   priceLower: number | null;
   priceUpper: number | null;
@@ -89,7 +93,7 @@ export type PositionAnalytics = {
   lastUncollectedUsd: number;
   baselineUncollectedUsd: number; // fees of unknown age at the first snapshot (pre-existing only)
   collectedUsd: number; // collections detected while tracking
-  entry: { amountA: number; amountB: number; usd: number; adjustments: number };
+  entry: { amountA: number; amountB: number; usd: number; adjustments: number; source: "chain" | "snapshot" };
   lifetime: WindowStats;
   windows: Record<string, WindowStats>; // "1h", "6h", "24h", "7d" (open positions only)
   ilUsd: number;

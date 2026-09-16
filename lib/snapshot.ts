@@ -1,10 +1,13 @@
 import { PublicKey } from "@solana/web3.js";
 import type { InStatement } from "@libsql/client";
 import { getDb } from "./db";
-import { fetchWalletPositions } from "./raydium";
-import type { SnapshotSummary, TrackingStatus } from "./types";
+import { lookupPositionOpen } from "./position-history";
+import { fetchWalletPositions, getConnection } from "./raydium";
+import type { Position, SnapshotSummary, TrackingStatus } from "./types";
 
 export const DEFAULT_INTERVAL_MINUTES = 15;
+// Stop retrying the open-transaction lookup for a position after this many failures.
+const MAX_HISTORY_ATTEMPTS = 10;
 
 export function getTrackedWallet(): string | null {
   const raw = process.env.TRACKED_WALLET?.trim();
@@ -70,14 +73,16 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
     statements.push({
       sql: `INSERT INTO positions (
               position_id, wallet, pool_id, pool_name, symbol_a, symbol_b,
-              first_seen_at, last_seen_at, closed_at, decimals_a, decimals_b
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+              first_seen_at, last_seen_at, closed_at, decimals_a, decimals_b, mint_a, mint_b
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
             ON CONFLICT (position_id) DO UPDATE SET
               last_seen_at = excluded.last_seen_at,
               closed_at = NULL,
               decimals_a = excluded.decimals_a,
-              decimals_b = excluded.decimals_b`,
-      args: [p.positionId, wallet, p.poolId, p.poolName, p.symbolA, p.symbolB, takenAt, takenAt, p.decimalsA, p.decimalsB],
+              decimals_b = excluded.decimals_b,
+              mint_a = excluded.mint_a,
+              mint_b = excluded.mint_b`,
+      args: [p.positionId, wallet, p.poolId, p.poolName, p.symbolA, p.symbolB, takenAt, takenAt, p.decimalsA, p.decimalsB, p.mintA, p.mintB],
     });
   }
 
@@ -98,6 +103,8 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
   const outcomes = await db.batch(statements, "write");
   const closedCount = Number(outcomes[outcomes.length - 2]?.rowsAffected ?? 0);
 
+  const historyLookups = await backfillOpenHistory(wallet, result.positions.map((r) => r.position));
+
   return {
     runId,
     wallet,
@@ -105,7 +112,53 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
     positionsFound: result.positions.length,
     positionsFailed: result.failedPositionIds.length,
     positionsClosed: closedCount,
+    historyLookups,
   };
+}
+
+/**
+ * For open positions whose open transaction hasn't been found yet, look it
+ * up on-chain and store the open time and deposited amounts. Runs after the
+ * snapshot is saved so a failed lookup never loses a snapshot.
+ */
+async function backfillOpenHistory(wallet: string, open: Position[]): Promise<number> {
+  const db = await getDb();
+  const pending = await db.execute({
+    sql: `SELECT position_id, first_seen_at FROM positions
+          WHERE wallet = ? AND closed_at IS NULL AND opened_at IS NULL
+            AND COALESCE(history_attempts, 0) < ?`,
+    args: [wallet, MAX_HISTORY_ATTEMPTS],
+  });
+  const firstSeen = new Map(pending.rows.map((r) => [String(r.position_id), new Date(String(r.first_seen_at))]));
+  const targets = open.filter((p) => firstSeen.has(p.positionId));
+  if (targets.length === 0) return 0;
+
+  const connection = getConnection();
+  let found = 0;
+  await Promise.all(
+    targets.map(async (p) => {
+      let result = null;
+      try {
+        // Deposits are summed only up to the first snapshot; later adds are
+        // picked up from liquidity changes between snapshots.
+        result = await lookupPositionOpen(connection, new PublicKey(p.positionId), wallet, p.mintA, p.mintB, firstSeen.get(p.positionId)!);
+      } catch (err) {
+        console.error(`Open-transaction lookup failed for ${p.positionId}:`, err instanceof Error ? err.message : err);
+      }
+      await db.execute({
+        sql: `UPDATE positions SET
+                history_attempts = COALESCE(history_attempts, 0) + 1,
+                opened_at = COALESCE(?, opened_at),
+                open_signature = COALESCE(?, open_signature),
+                entry_amount_a = COALESCE(?, entry_amount_a),
+                entry_amount_b = COALESCE(?, entry_amount_b)
+              WHERE position_id = ?`,
+        args: [result?.openedAt ?? null, result?.signature ?? null, result?.depositA ?? null, result?.depositB ?? null, p.positionId],
+      });
+      if (result) found++;
+    }),
+  );
+  return found;
 }
 
 export async function getTrackingStatus(): Promise<TrackingStatus> {

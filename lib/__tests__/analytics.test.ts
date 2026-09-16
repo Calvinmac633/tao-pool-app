@@ -19,6 +19,9 @@ const position: PositionRow = {
   firstSeenAt: iso(0),
   lastSeenAt: iso(0),
   closedAt: null,
+  openedAt: null,
+  entryAmountA: null,
+  entryAmountB: null,
 };
 
 function row(minutes: number, o: Partial<SnapshotRow> = {}): SnapshotRow {
@@ -40,8 +43,14 @@ function row(minutes: number, o: Partial<SnapshotRow> = {}): SnapshotRow {
   };
 }
 
-// Tracking began well before the position, so its first snapshot counts.
-const opts = (nowMinutes: number) => ({ trackingStartedAt: iso(-60), now: T0 + nowMinutes * 60 });
+// Tracking began well before the position and the previous run was 5 minutes
+// before its first snapshot, so its first snapshot counts (opened since then).
+const opts = (nowMinutes: number) => ({
+  trackingStartedAt: iso(-60),
+  now: T0 + nowMinutes * 60,
+  runTimes: [T0 - 300],
+  intervalSeconds: 300,
+});
 
 test("fees accumulate across intervals and survive a collection", () => {
   const rows = [
@@ -57,12 +66,62 @@ test("fees accumulate across intervals and survive a collection", () => {
   close(r.analytics.lastUncollectedUsd, 5);
 });
 
-test("a pre-existing position excludes fees of unknown age", () => {
+test("a position present at the first ever run excludes fees of unknown age", () => {
   const rows = [row(0, { feeAmountB: 7, feeUsd: 7 }), row(5, { feeAmountB: 9, feeUsd: 9 })];
-  const r = analyzePosition(position, rows, { trackingStartedAt: iso(0), now: T0 + 300 })!;
+  const r = analyzePosition(position, rows, { trackingStartedAt: iso(0), now: T0 + 300, runTimes: [T0, T0 + 300] })!;
   assert.equal(r.analytics.preExisting, true);
   close(r.analytics.baselineUncollectedUsd, 7);
   close(r.analytics.lifetime.earnedUsd, 2);
+});
+
+test("with no open time, a recent previous run dates first-sight fees to that run", () => {
+  const rows = [row(0, { feeAmountB: 1, feeUsd: 1 }), row(5, { feeAmountB: 2, feeUsd: 2 })];
+  const r = analyzePosition(position, rows, opts(5))!.analytics;
+  assert.equal(r.preExisting, false);
+  close(r.lifetime.earnedUsd, 2);
+  close(r.lifetime.coveredSeconds, 600); // 5 min assumed before first snapshot + 5 min after
+  assert.equal(r.openedAtKnown, false);
+});
+
+test("with no open time, a position first seen after a tracking gap is treated as unknown age", () => {
+  const rows = [row(0, { feeAmountB: 50, feeUsd: 50 }), row(5, { feeAmountB: 51, feeUsd: 51 })];
+  const r = analyzePosition(position, rows, { ...opts(5), runTimes: [T0 - 19 * 3600] })!.analytics;
+  assert.equal(r.preExisting, true);
+  close(r.baselineUncollectedUsd, 50);
+  close(r.lifetime.earnedUsd, 1);
+});
+
+test("a known open time after the previous run dates fees exactly, even across a gap", () => {
+  const rows = [row(0, { feeAmountB: 1, feeUsd: 1 }), row(5, { feeAmountB: 2, feeUsd: 2 })];
+  const opened = { ...position, openedAt: iso(-10) };
+  const r = analyzePosition(opened, rows, { ...opts(5), runTimes: [T0 - 20 * 60] })!.analytics;
+  assert.equal(r.preExisting, false);
+  assert.equal(r.openedAtKnown, true);
+  assert.equal(r.openedAt, iso(-10));
+  close(r.lifetime.earnedUsd, 2);
+  close(r.lifetime.coveredSeconds, 900); // 10 min since open + 5 min tracked
+});
+
+test("a known open time before the previous run means the first-sight fees are unknown age", () => {
+  const rows = [row(0, { feeAmountB: 50, feeUsd: 50 }), row(5, { feeAmountB: 51, feeUsd: 51 })];
+  const opened = { ...position, openedAt: iso(-30) };
+  const r = analyzePosition(opened, rows, { ...opts(5), runTimes: [T0 - 20 * 60] })!.analytics;
+  assert.equal(r.preExisting, true);
+  close(r.lifetime.earnedUsd, 1);
+});
+
+test("deposit amounts from the open transaction become the IL baseline", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a = amountsAtPrice(6000, range, 225, 0, 0); // 100 A, 30000 B
+  const rows = [row(0, { ...a, usdValue: a.amountA * 225 + a.amountB, liquidity: "6000", ...range })];
+  // Deposited at a different price earlier: 120 A + 25500 B (worth 52500 at 225).
+  const opened = { ...position, openedAt: iso(-3), entryAmountA: 120, entryAmountB: 25500 };
+  const r = analyzePosition(opened, rows, opts(0))!.analytics;
+  assert.equal(r.entry.source, "chain");
+  close(r.entry.amountA, 120);
+  close(r.entry.amountB, 25500);
+  close(r.ilUsd, 52500 - (120 * 225 + 25500)); // 0 here by construction
+  close(r.projections!.upper.hodlUsd, 120 * 400 + 25500);
 });
 
 test("APR annualises earnings over time-weighted capital", () => {
@@ -133,7 +192,7 @@ test("net performance is IL plus fees earned", () => {
 
 test("a closed position measures lifetime up to its last snapshot", () => {
   const rows = [row(0), row(60, { feeAmountB: 2, feeUsd: 2 })];
-  const closed = { ...position, closedAt: iso(65) };
+  const closed = { ...position, closedAt: iso(65), openedAt: iso(0) };
   const r = analyzePosition(closed, rows, opts(24 * 60))!.analytics;
   close(r.lifetime.coveredSeconds, 3600);
   close(r.lifetime.earnedUsd, 2);
