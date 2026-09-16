@@ -96,6 +96,28 @@ export function impermanentLossAt(
   };
 }
 
+/**
+ * Pool price at the moment of a two-sided deposit into `range`, implied by
+ * the ratio of the two tokens: a position's composition is a pure function
+ * of price, so the ratio pins the price exactly. Null for a single-sided
+ * deposit (price was outside the range, exact value unknown).
+ */
+export function impliedPriceFromDeposit(deposit: Amounts, range: Range, decimalsA: number, decimalsB: number): number | null {
+  if (!(deposit.amountA > 0) || !(deposit.amountB > 0)) return null;
+  const A = deposit.amountA * Math.pow(10, decimalsA);
+  const B = deposit.amountB * Math.pow(10, decimalsB);
+  const sqrtLower = Math.sqrt(toRawPrice(range.priceLower, decimalsA, decimalsB));
+  const sqrtUpper = Math.sqrt(toRawPrice(range.priceUpper, decimalsA, decimalsB));
+  // In range: A = L (1/x - 1/sqrtUpper) and B = L (x - sqrtLower) with x = sqrt(price).
+  // Eliminating L gives A x^2 + (B/sqrtUpper - A sqrtLower) x - B = 0.
+  const qa = A;
+  const qb = B / sqrtUpper - A * sqrtLower;
+  const qc = -B;
+  const x = (-qb + Math.sqrt(qb * qb - 4 * qa * qc)) / (2 * qa);
+  if (!Number.isFinite(x) || x <= 0) return null;
+  return x * x * Math.pow(10, decimalsA - decimalsB);
+}
+
 export function isInRange(range: Range, price: number): boolean {
   return price >= range.priceLower && price < range.priceUpper;
 }

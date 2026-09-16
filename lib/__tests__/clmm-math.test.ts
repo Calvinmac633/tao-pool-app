@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { amountsAtPrice, impermanentLossAt, isInRange, tickToPrice } from "../clmm-math";
+import { amountsAtPrice, impermanentLossAt, impliedPriceFromDeposit, isInRange, tickToPrice } from "../clmm-math";
 
 const close = (a: number, b: number, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol * Math.max(1, Math.abs(b)), `${a} != ${b}`);
 
@@ -60,4 +60,19 @@ test("isInRange is inclusive at the bottom, exclusive at the top", () => {
   assert.equal(isInRange(range, 399.99), true);
   assert.equal(isInRange(range, 400), false);
   assert.equal(isInRange(range, 99), false);
+});
+
+test("a two-sided deposit's token ratio gives back the price it was made at", () => {
+  for (const p of [101, 150, 225, 399]) {
+    const deposit = amountsAtPrice(L, range, p, 0, 0);
+    close(impliedPriceFromDeposit(deposit, range, 0, 0)!, p, 1e-9);
+  }
+  // With decimals too.
+  const d = amountsAtPrice(L * 1e9, { priceLower: 100, priceUpper: 400 }, 225, 9, 6);
+  close(impliedPriceFromDeposit(d, { priceLower: 100, priceUpper: 400 }, 9, 6)!, 225, 1e-9);
+});
+
+test("a single-sided deposit has no implied price", () => {
+  assert.equal(impliedPriceFromDeposit({ amountA: 10, amountB: 0 }, range, 0, 0), null);
+  assert.equal(impliedPriceFromDeposit({ amountA: 0, amountB: 500 }, range, 0, 0), null);
 });

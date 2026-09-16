@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test lib/__tests__/*.test.ts"
+    "test": "tsx --test lib/__tests__/*.test.ts",
+    "verify": "tsx scripts/verify.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.18.0",

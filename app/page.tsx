@@ -2,8 +2,8 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import type { Position, PositionsResponse, TrackingStatus, WalletAnalytics } from "@/lib/types";
-import { ClosedPositionsTable, OpenPositionCards, PortfolioPanel } from "./analytics-panels";
-import { formatAgo, formatDate, price, usd } from "./format";
+import { ClosedPositionsTable, OpenPositionCards, OpenPositionsPanel, OverallPanel } from "./analytics-panels";
+import { aprText, formatAgo, formatDate, price, usd, WINDOW_SECONDS } from "./format";
 
 const NETWORK_ERROR = "Couldn't reach the network. Try again.";
 
@@ -146,9 +146,10 @@ export default function Home() {
 
       {analytics && (
         <>
-          <PortfolioPanel data={analytics} />
+          <OpenPositionsPanel data={analytics} />
           <OpenPositionCards positions={analytics.open} asOf={analytics.asOf} />
           <ClosedPositionsTable positions={analytics.closed} />
+          <OverallPanel data={analytics} />
         </>
       )}
     </main>
@@ -172,7 +173,6 @@ function Results({ data, analytics }: { data: PositionsResponse; analytics: Wall
           <tbody>
             {data.positions.map((p: Position) => {
               const a = byId.get(p.positionId);
-              const apr24 = a?.windows["24h"];
               return (
                 <tr key={p.positionId} className="border-b border-neutral-200 dark:border-neutral-800">
                   <td className="py-2 pr-4">
@@ -187,9 +187,7 @@ function Results({ data, analytics }: { data: PositionsResponse; analytics: Wall
                   <td className="py-2 pr-4 text-right tabular-nums">{usd(p.usdValue)}</td>
                   <td className="py-2 pr-4 text-right tabular-nums">{usd(p.unclaimedFeeUsd)}</td>
                   {analytics && (
-                    <td className="py-2 text-right tabular-nums">
-                      {apr24 && apr24.apr != null && apr24.coveredSeconds >= 600 ? `${(apr24.apr * 100).toFixed(0)}%` : "—"}
-                    </td>
+                    <td className="py-2 text-right tabular-nums">{aprText(a?.windows["24h"], WINDOW_SECONDS["24h"])}</td>
                   )}
                 </tr>
               );

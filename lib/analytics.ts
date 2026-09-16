@@ -3,8 +3,8 @@
  * impermanent loss, projections at the range bounds, and portfolio totals.
  * No I/O here so everything is unit-testable.
  */
-import { amountsAtPrice, impermanentLossAt, type Amounts, type Range } from "./clmm-math";
-import type { PortfolioAnalytics, PositionAnalytics, Projection, WindowStats } from "./types";
+import { amountsAtPrice, impermanentLossAt, impliedPriceFromDeposit, type Amounts, type Range } from "./clmm-math";
+import type { EntryEvent, PortfolioAnalytics, PositionAnalytics, Projection, WindowStats } from "./types";
 
 export type SnapshotRow = {
   takenAt: string; // ISO
@@ -36,6 +36,7 @@ export type PositionRow = {
   openedAt: string | null; // from the open transaction, when found
   entryAmountA: number | null; // deposited at open, when found
   entryAmountB: number | null;
+  deposits: { at: string; amountA: number; amountB: number }[] | null; // per-transaction deposits, when found
 };
 
 export const WINDOWS: Record<string, number> = {
@@ -171,6 +172,19 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     : { amountA: first.amountA, amountB: first.amountB };
   let capitalChanges = 0;
 
+  // Every known deposit, each with the pool price at that moment. The range is
+  // fixed for a position's life, so any snapshot's bounds serve for all of them.
+  const range: Range | null = last.priceLower != null && last.priceUpper != null ? { priceLower: last.priceLower, priceUpper: last.priceUpper } : null;
+  const priceOf = (d: Amounts) => (range ? impliedPriceFromDeposit(d, range, decimalsA, decimalsB) : null);
+  const history: EntryEvent[] = [];
+  if (chainEntry && position.deposits && position.deposits.length > 0) {
+    for (const d of position.deposits) history.push({ at: d.at, amountA: d.amountA, amountB: d.amountB, price: priceOf(d), source: "chain" });
+  } else if (chainEntry) {
+    history.push({ at: position.openedAt ?? first.takenAt, amountA: entry.amountA, amountB: entry.amountB, price: priceOf(entry), source: "chain" });
+  } else {
+    history.push({ at: first.takenAt, amountA: entry.amountA, amountB: entry.amountB, price: first.priceA, source: "snapshot" });
+  }
+
   // Fees showing at the first snapshot are only counted when we know how
   // long they took to accrue; otherwise they'd inflate the rate.
   const accrualStart = feeAgeStart(position, firstSec, opts);
@@ -199,7 +213,10 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     if (cur.liquidity && prev.liquidity && cur.liquidity !== prev.liquidity && cur.priceLower && cur.priceUpper) {
       const range: Range = { priceLower: cur.priceLower, priceUpper: cur.priceUpper };
       const expected = amountsAtPrice(Number(prev.liquidity), range, cur.priceA, decimalsA, decimalsB);
-      entry = { amountA: entry.amountA + (cur.amountA - expected.amountA), amountB: entry.amountB + (cur.amountB - expected.amountB) };
+      const deltaA = cur.amountA - expected.amountA;
+      const deltaB = cur.amountB - expected.amountB;
+      entry = { amountA: entry.amountA + deltaA, amountB: entry.amountB + deltaB };
+      history.push({ at: cur.takenAt, amountA: deltaA, amountB: deltaB, price: cur.priceA, source: "snapshot" });
       capitalChanges++;
     }
   }
@@ -214,16 +231,28 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     }
   }
 
-  // Impermanent loss now, and projected at the range bounds.
+  // Entry price: the open deposit's implied price, plus a capital-weighted
+  // average when there were several deposits.
+  const entryPrice = history[0]?.price ?? null;
+  let weightSum = 0;
+  let weightedPrice = 0;
+  for (const h of history) {
+    if (h.price == null) continue;
+    const valueB = h.amountA * h.price + h.amountB;
+    if (valueB <= 0) continue; // withdrawals don't set an entry price
+    weightSum += valueB;
+    weightedPrice += valueB * h.price;
+  }
+  const avgEntryPrice = weightSum > 0 ? weightedPrice / weightSum : entryPrice;
+
+  // Impermanent loss now, and projected at the entry price and range bounds.
   const usdB = usdPerB(last);
   const hodlUsd = (entry.amountA * last.priceA + entry.amountB) * usdB;
-  const ilUsd = last.usdValue - hodlUsd;
-  const ilPct = hodlUsd > 0 ? ilUsd / hodlUsd : 0;
-  const netUsd = ilUsd + lifetime.earnedUsd;
+  let ilUsd = last.usdValue - hodlUsd;
+  let ilPct = hodlUsd > 0 ? ilUsd / hodlUsd : 0;
 
   let projections: PositionAnalytics["projections"] = null;
-  if (last.liquidity && last.priceLower && last.priceUpper) {
-    const range: Range = { priceLower: last.priceLower, priceUpper: last.priceUpper };
+  if (last.liquidity && range) {
     const L = Number(last.liquidity);
     const project = (price: number): Projection => {
       const r = impermanentLossAt(L, range, entry, price, decimalsA, decimalsB);
@@ -237,8 +266,18 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
         ilPct: r.ilPct,
       };
     };
-    projections = { lower: project(range.priceLower), current: project(last.priceA), upper: project(range.priceUpper) };
+    projections = {
+      entry: entryPrice != null ? project(entryPrice) : null,
+      lower: project(range.priceLower),
+      current: project(last.priceA),
+      upper: project(range.priceUpper),
+    };
+    // Use the closed-form value for the headline too, so it agrees with the
+    // "now" projection and is exactly zero at open instead of API noise.
+    ilUsd = projections.current.ilUsd;
+    ilPct = projections.current.ilPct;
   }
+  const netUsd = ilUsd + lifetime.earnedUsd;
 
   const analytics: PositionAnalytics = {
     positionId: position.positionId,
@@ -259,7 +298,16 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     lastUncollectedUsd: last.feeUsd + last.rewardUsd,
     baselineUncollectedUsd,
     collectedUsd,
-    entry: { amountA: entry.amountA, amountB: entry.amountB, usd: hodlUsd, adjustments: capitalChanges, source: chainEntry ? "chain" : "snapshot" },
+    entry: {
+      amountA: entry.amountA,
+      amountB: entry.amountB,
+      usd: hodlUsd,
+      adjustments: capitalChanges,
+      source: chainEntry ? "chain" : "snapshot",
+      price: entryPrice,
+      avgPrice: avgEntryPrice,
+      history,
+    },
     lifetime,
     windows,
     ilUsd,
@@ -301,18 +349,24 @@ export function analyzePortfolio(positionIntervals: Interval[][], rows: Snapshot
       capitalUsd: capitalByRun.get(runTimes[i - 1]) ?? 0,
     });
   }
+  // Earnings attributed to the first run may have accrued before it (a
+  // position opened between runs, or before tracking with a known open time),
+  // so the leading interval starts at the earliest position start.
+  let startSec: number | null = null;
   if (runTimes.length > 0) {
     const t0 = runTimes[0];
-    intervals.unshift({ start: t0, end: t0, earnedUsd: earnedByRun.get(t0) ?? 0, capitalUsd: capitalByRun.get(t0) ?? 0 });
+    const earliest = Math.min(t0, ...positionIntervals.flat().map((iv) => iv.start));
+    intervals.unshift({ start: earliest, end: t0, earnedUsd: earnedByRun.get(t0) ?? 0, capitalUsd: capitalByRun.get(t0) ?? 0 });
+    startSec = earliest;
   }
 
   const windows: Record<string, WindowStats> = {};
   for (const [label, seconds] of Object.entries(WINDOWS)) {
     windows[label] = windowStats(intervals, now - seconds, now);
   }
-  const sinceStart = runTimes.length ? windowStats(intervals, runTimes[0], now) : windowStats([], 0, 0);
+  const sinceStart = startSec != null ? windowStats(intervals, startSec, now) : windowStats([], 0, 0);
   return {
-    trackingStartedAt: runTimes.length ? new Date(runTimes[0] * 1000).toISOString() : null,
+    trackingStartedAt: startSec != null ? new Date(startSec * 1000).toISOString() : null,
     currentCapitalUsd: runTimes.length ? (capitalByRun.get(runTimes[runTimes.length - 1]) ?? 0) : 0,
     windows,
     sinceStart,

@@ -37,6 +37,7 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     openedAt: r.opened_at == null ? null : String(r.opened_at),
     entryAmountA: r.entry_amount_a == null ? null : Number(r.entry_amount_a),
     entryAmountB: r.entry_amount_b == null ? null : Number(r.entry_amount_b),
+    deposits: parseDeposits(r.deposits_json),
   }));
 
   const rows: SnapshotRow[] = snapshotsRes.rows.map((r) => ({
@@ -70,11 +71,19 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
   const open: PositionAnalytics[] = [];
   const closed: PositionAnalytics[] = [];
   const intervals: Interval[][] = [];
+  const openIntervals: Interval[][] = [];
+  const openIds = new Set<string>();
   for (const p of positions) {
     const result = analyzePosition(p, byPosition.get(p.positionId) ?? [], analyzeOpts);
     if (!result) continue;
     intervals.push(result.intervals);
-    (p.closedAt ? closed : open).push(result.analytics);
+    if (p.closedAt) {
+      closed.push(result.analytics);
+    } else {
+      open.push(result.analytics);
+      openIntervals.push(result.intervals);
+      openIds.add(p.positionId);
+    }
   }
   open.sort((a, b) => b.lastUsdValue - a.lastUsdValue);
   closed.sort((a, b) => (b.closedAt ?? "").localeCompare(a.closedAt ?? ""));
@@ -84,6 +93,19 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     asOf: rows.length ? rows[rows.length - 1].takenAt : null,
     open,
     closed: closed.slice(0, CLOSED_LIMIT),
+    openPortfolio: analyzePortfolio(openIntervals, rows.filter((r) => openIds.has(r.positionId)), now),
     portfolio: analyzePortfolio(intervals, rows, now),
   };
+}
+
+function parseDeposits(json: unknown): PositionRow["deposits"] {
+  if (typeof json !== "string") return null;
+  try {
+    const list = JSON.parse(json);
+    return Array.isArray(list)
+      ? list.map((d) => ({ at: String(d.at), amountA: Number(d.amountA ?? 0), amountB: Number(d.amountB ?? 0) }))
+      : null;
+  } catch {
+    return null;
+  }
 }

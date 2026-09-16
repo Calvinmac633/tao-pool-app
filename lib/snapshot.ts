@@ -151,9 +151,13 @@ async function backfillOpenHistory(wallet: string, open: Position[]): Promise<nu
                 opened_at = COALESCE(?, opened_at),
                 open_signature = COALESCE(?, open_signature),
                 entry_amount_a = COALESCE(?, entry_amount_a),
-                entry_amount_b = COALESCE(?, entry_amount_b)
+                entry_amount_b = COALESCE(?, entry_amount_b),
+                deposits_json = COALESCE(?, deposits_json)
               WHERE position_id = ?`,
-        args: [result?.openedAt ?? null, result?.signature ?? null, result?.depositA ?? null, result?.depositB ?? null, p.positionId],
+        args: [
+          result?.openedAt ?? null, result?.signature ?? null, result?.depositA ?? null, result?.depositB ?? null,
+          result ? JSON.stringify(result.deposits) : null, p.positionId,
+        ],
       });
       if (result) found++;
     }),

@@ -93,20 +93,38 @@ export type PositionAnalytics = {
   lastUncollectedUsd: number;
   baselineUncollectedUsd: number; // fees of unknown age at the first snapshot (pre-existing only)
   collectedUsd: number; // collections detected while tracking
-  entry: { amountA: number; amountB: number; usd: number; adjustments: number; source: "chain" | "snapshot" };
+  entry: {
+    amountA: number; // total tokens put in (deposits, adjusted for later liquidity changes)
+    amountB: number;
+    usd: number; // value of those tokens at the last price
+    adjustments: number; // liquidity changes seen between snapshots
+    source: "chain" | "snapshot";
+    price: number | null; // pool price at the open deposit, implied by its token ratio
+    avgPrice: number | null; // capital-weighted across all deposits
+    history: EntryEvent[]; // every deposit / withdrawal known, oldest first
+  };
   lifetime: WindowStats;
   windows: Record<string, WindowStats>; // "1h", "6h", "24h", "7d" (open positions only)
   ilUsd: number;
   ilPct: number;
   netUsd: number; // ilUsd + lifetime earned
-  projections: { lower: Projection; current: Projection; upper: Projection } | null;
+  projections: { entry: Projection | null; lower: Projection; current: Projection; upper: Projection } | null;
+};
+
+/** A change to the tokens in a position: a deposit (positive) or withdrawal (negative). */
+export type EntryEvent = {
+  at: string;
+  amountA: number;
+  amountB: number;
+  price: number | null; // pool price at the time; null if it could not be determined
+  source: "chain" | "snapshot"; // from a transaction, or inferred from a liquidity change between snapshots
 };
 
 export type PortfolioAnalytics = {
-  trackingStartedAt: string | null;
-  currentCapitalUsd: number;
+  trackingStartedAt: string | null; // earliest point the figures cover
+  currentCapitalUsd: number; // sum of the latest values of the positions included
   windows: Record<string, WindowStats>;
-  sinceStart: WindowStats;
+  sinceStart: WindowStats; // everything since trackingStartedAt
 };
 
 export type WalletAnalytics = {
@@ -114,5 +132,6 @@ export type WalletAnalytics = {
   asOf: string | null; // time of the latest snapshot
   open: PositionAnalytics[];
   closed: PositionAnalytics[]; // most recent first
-  portfolio: PortfolioAnalytics;
+  openPortfolio: PortfolioAnalytics; // only the positions open now, since their opens
+  portfolio: PortfolioAnalytics; // every position since tracking began, open and closed
 };

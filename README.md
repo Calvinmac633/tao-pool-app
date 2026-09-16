@@ -28,7 +28,10 @@ All variables are read only on the server, so keys never reach the browser. `.en
 ```bash
 npm run dev     # app + tracker on http://localhost:3000
 npm test        # unit tests for the CLMM maths and analytics
+npm run verify  # consistency checks over the live tracker database
 ```
+
+`npm run verify` recomputes each position's figures a second way and checks the accounting identities: fees that ever showed as uncollected are either still uncollected or were collected, APR equals earned over time-weighted capital, impermanent loss is never positive, and the headline IL matches the projection at the current price.
 
 Open [http://localhost:3000](http://localhost:3000). The tracked wallet is prefilled.
 
@@ -60,8 +63,9 @@ Fees are stored as token amounts plus price so USD figures can be recomputed lat
 Everything below is computed from stored snapshots, so it only covers time the tracker was running.
 
 - **Fees earned**: the increase in uncollected fees between consecutive snapshots. A decrease means fees were collected; the previous amount is banked as collected and the new amount counts as earned since. Fees are valued at the price when they were observed.
-- **APR**: fees earned in a window divided by the time-weighted average position value in that window, annualised. Windows are 1h, 6h, 24h, 7d per position, and 24h, 7d, and since tracking for the whole wallet. When a window is only partly covered by data, the UI says how much data backs the number.
+- **APR**: fees earned in a window divided by the time-weighted average position value in that window, annualised. Windows are 1h, 6h, 24h, 7d per position. The **Open positions** section aggregates only the positions open now, since they were opened, and sizes capital for a target yearly return. The **Overall** section at the bottom aggregates every position since tracking began, open and closed, as one strategy. When a window is only partly covered by data, the UI says how much data backs the number.
 - **Impermanent loss**: position value minus the value of the entry tokens held unchanged. The entry is the first snapshot's tokens, adjusted when liquidity changes (adds or partial withdrawals). Because a CLMM position's composition is a pure function of liquidity, range and price, IL is also projected exactly at the lower and upper range bounds. Fees are never included in projections.
+- **Entry price**: implied by the token ratio of the open deposit, since a position's composition pins the price exactly. Each deposit transaction gets its own implied price; with several deposits the card shows the open price and a capital-weighted average. Every deposit and withdrawal is kept per position as an entry history.
 - **Net**: impermanent loss plus fees earned.
 - **Open time and entry**: when a position is first seen, the app reads its transaction history on-chain (`lib/position-history.ts`). The oldest transaction gives the open time. The wallet's token outflows across every transaction up to the first snapshot, summed, give the deposit, which becomes the IL baseline. Adds after the first snapshot are caught by liquidity changes between snapshots instead. Partial withdrawals before tracking are not subtracted, since from balances alone they look like fee collections; that can only make IL look worse, never better.
 - **Fees of unknown age**: fees showing at a position's first snapshot only count when their age is known: the position opened after the previous snapshot run. A position present at the first ever run, or one that opened during a gap while the tracker was off, has those fees excluded and its figures labelled "since tracking". Assuming unknown age can only understate APR, never inflate it.

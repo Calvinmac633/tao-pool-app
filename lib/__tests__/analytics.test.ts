@@ -22,6 +22,7 @@ const position: PositionRow = {
   openedAt: null,
   entryAmountA: null,
   entryAmountB: null,
+  deposits: null,
 };
 
 function row(minutes: number, o: Partial<SnapshotRow> = {}): SnapshotRow {
@@ -211,4 +212,54 @@ test("portfolio sums capital and earnings across positions", () => {
   close(p.windows["1h"].avgCapitalUsd, 2000);
   close(p.windows["1h"].apr!, (4 / 2000) * (365 * 24));
   close(p.sinceStart.earnedUsd, 4);
+});
+
+test("entry price comes from the open deposit and the headline IL matches the projection", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const deposit = amountsAtPrice(6000, range, 225, 0, 0); // 100 A + 30000 B at 225
+  const now = amountsAtPrice(6000, range, 256, 0, 0); // price moved to 256
+  const rows = [row(0, { ...now, priceA: 256, usdValue: now.amountA * 256 + now.amountB, liquidity: "6000", ...range })];
+  const opened = {
+    ...position,
+    openedAt: iso(-3),
+    entryAmountA: deposit.amountA,
+    entryAmountB: deposit.amountB,
+    deposits: [{ at: iso(-3), ...deposit }],
+  };
+  const r = analyzePosition(opened, rows, opts(0))!.analytics;
+  close(r.entry.price!, 225, 1e-9);
+  close(r.entry.avgPrice!, 225, 1e-9);
+  assert.equal(r.entry.history.length, 1);
+  assert.ok(r.projections!.entry);
+  close(r.projections!.entry!.ilUsd, 0, 1e-6);
+  close(r.ilUsd, r.projections!.current.ilUsd);
+  assert.ok(r.ilUsd < 0);
+});
+
+test("several deposits give an open price and a capital-weighted average", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const d1 = amountsAtPrice(6000, range, 225, 0, 0); // ~52500 B of value at 225
+  const d2 = amountsAtPrice(6000, range, 300, 0, 0); // second deposit at 300
+  const total = { amountA: d1.amountA + d2.amountA, amountB: d1.amountB + d2.amountB };
+  const nowAmounts = amountsAtPrice(12000, range, 300, 0, 0);
+  const rows = [row(0, { ...nowAmounts, priceA: 300, usdValue: nowAmounts.amountA * 300 + nowAmounts.amountB, liquidity: "12000", ...range })];
+  const opened = { ...position, openedAt: iso(-10), entryAmountA: total.amountA, entryAmountB: total.amountB, deposits: [{ at: iso(-10), ...d1 }, { at: iso(-5), ...d2 }] };
+  const r = analyzePosition(opened, rows, opts(0))!.analytics;
+  close(r.entry.price!, 225, 1e-9);
+  const w1 = d1.amountA * 225 + d1.amountB;
+  const w2 = d2.amountA * 300 + d2.amountB;
+  close(r.entry.avgPrice!, (225 * w1 + 300 * w2) / (w1 + w2), 1e-9);
+  assert.equal(r.entry.history.length, 2);
+  assert.ok(r.ilUsd <= 1e-6);
+});
+
+test("portfolio coverage starts at the earliest known position open", () => {
+  const rows = [row(0, { feeAmountB: 1, feeUsd: 1 }), row(5, { feeAmountB: 2, feeUsd: 2 })];
+  const opened = { ...position, openedAt: iso(-10) };
+  const a = analyzePosition(opened, rows, { ...opts(5), runTimes: [T0 - 20 * 60] })!;
+  const p = analyzePortfolio([a.intervals], rows, T0 + 300);
+  assert.equal(p.trackingStartedAt, iso(-10));
+  close(p.sinceStart.coveredSeconds, 900);
+  close(p.sinceStart.earnedUsd, 2);
+  close(p.sinceStart.avgCapitalUsd, 1000);
 });

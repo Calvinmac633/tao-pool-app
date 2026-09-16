@@ -11,8 +11,12 @@ export type PositionOpen = {
   signature: string; // that transaction
   depositA: number | null; // total paid in across all transactions up to `before`; null if never touched
   depositB: number | null;
+  deposits: DepositTx[]; // each transaction that paid tokens in, oldest first
   transactions: number; // transactions inspected
 };
+
+/** One transaction in which the wallet paid tokens into the position. */
+export type DepositTx = { at: string; signature: string; amountA: number; amountB: number };
 
 export type Deposit = { depositA: number | null; depositB: number | null };
 
@@ -86,11 +90,16 @@ export async function lookupPositionOpen(
   const beforeSec = before.getTime() / 1000;
   const relevant = sigs.filter((s) => s.blockTime != null && s.blockTime <= beforeSec).slice(0, MAX_TRANSACTIONS);
   const deposits: Deposit[] = [];
+  const depositTxs: DepositTx[] = [];
   for (const s of relevant) {
     try {
       const tx = await connection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0 });
       if (tx?.meta) {
-        deposits.push(depositsFromBalances(tx.meta.preTokenBalances ?? [], tx.meta.postTokenBalances ?? [], wallet, mintA, mintB));
+        const d = depositsFromBalances(tx.meta.preTokenBalances ?? [], tx.meta.postTokenBalances ?? [], wallet, mintA, mintB);
+        deposits.push(d);
+        if ((d.depositA ?? 0) > 0 || (d.depositB ?? 0) > 0) {
+          depositTxs.push({ at: new Date(s.blockTime! * 1000).toISOString(), signature: s.signature, amountA: d.depositA ?? 0, amountB: d.depositB ?? 0 });
+        }
       }
     } catch (err) {
       console.error("Failed to load position transaction", s.signature, err instanceof Error ? err.message : err);
@@ -101,6 +110,7 @@ export async function lookupPositionOpen(
     openedAt: new Date(oldest.blockTime * 1000).toISOString(),
     signature: oldest.signature,
     ...accumulateDeposits(deposits),
+    deposits: depositTxs,
     transactions: relevant.length,
   };
 }

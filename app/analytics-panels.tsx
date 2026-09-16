@@ -1,80 +1,103 @@
 "use client";
 
 import { useState } from "react";
-import type { PositionAnalytics, Projection, WalletAnalytics, WindowStats } from "@/lib/types";
-import { amount, formatDate, formatDuration, pct, pctSigned, price, usd, usdSigned } from "./format";
-
-const WINDOW_SECONDS: Record<string, number> = { "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600, "7d": 7 * 24 * 3600 };
-
-/** APR text with a coverage note when the window isn't fully backed by data. */
-function aprText(w: WindowStats | undefined, windowSeconds?: number): string {
-  if (!w || w.apr == null || w.coveredSeconds < 600) return "—";
-  const base = pct(w.apr, 0);
-  if (windowSeconds && w.coveredSeconds < windowSeconds * 0.9) {
-    return `${base} (${formatDuration(w.coveredSeconds)} of data)`;
-  }
-  return base;
-}
+import type { PortfolioAnalytics, PositionAnalytics, Projection, WalletAnalytics } from "@/lib/types";
+import { amount, aprText, formatDate, formatDuration, pct, pctSigned, price, usd, usdSigned, WINDOW_SECONDS } from "./format";
 
 const gain = (n: number) => (n >= 0 ? "text-emerald-700 dark:text-emerald-400" : "text-red-600 dark:text-red-400");
 
-export function PortfolioPanel({ data }: { data: WalletAnalytics }) {
-  const p = data.portfolio;
+/** Windows table shared by the open-positions and overall panels. */
+function WindowsTable({ p, sinceLabel }: { p: PortfolioAnalytics; sinceLabel: string }) {
+  return (
+    <div className="mt-3 overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-neutral-300 text-left text-neutral-600 dark:border-neutral-700 dark:text-neutral-400">
+            <th className="py-2 pr-4 font-medium">Window</th>
+            <th className="py-2 pr-4 text-right font-medium">Fees earned</th>
+            <th className="py-2 pr-4 text-right font-medium">Avg capital</th>
+            <th className="py-2 text-right font-medium">APR</th>
+          </tr>
+        </thead>
+        <tbody>
+          {["24h", "7d"].map((k) => (
+            <tr key={k} className="border-b border-neutral-200 dark:border-neutral-800">
+              <td className="py-2 pr-4">{k}</td>
+              <td className="py-2 pr-4 text-right tabular-nums">{usd(p.windows[k]?.earnedUsd ?? 0)}</td>
+              <td className="py-2 pr-4 text-right tabular-nums">{usd(p.windows[k]?.avgCapitalUsd ?? 0)}</td>
+              <td className="py-2 text-right tabular-nums">{aprText(p.windows[k], WINDOW_SECONDS[k])}</td>
+            </tr>
+          ))}
+          <tr className="border-b border-neutral-200 dark:border-neutral-800">
+            <td className="py-2 pr-4">{sinceLabel}</td>
+            <td className="py-2 pr-4 text-right tabular-nums">{usd(p.sinceStart.earnedUsd)}</td>
+            <td className="py-2 pr-4 text-right tabular-nums">{usd(p.sinceStart.avgCapitalUsd)}</td>
+            <td className="py-2 text-right tabular-nums">{aprText(p.sinceStart)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Pick the APR to plan with: the longest window with at least a day of data, else since the start. */
+function planningApr(p: PortfolioAnalytics): { label: string; apr: number | null } {
+  if ((p.windows["7d"]?.coveredSeconds ?? 0) >= 86400) return { label: "7d", apr: p.windows["7d"].apr };
+  if ((p.windows["24h"]?.coveredSeconds ?? 0) >= 3600) return { label: "24h", apr: p.windows["24h"].apr };
+  return { label: "since open", apr: p.sinceStart.coveredSeconds >= 600 ? p.sinceStart.apr : null };
+}
+
+/** The positions open right now, aggregated since they were opened. */
+export function OpenPositionsPanel({ data }: { data: WalletAnalytics }) {
+  const p = data.openPortfolio;
   const [target, setTarget] = useState("50000");
-
-  // Size capital off the longest window with at least a day of coverage.
-  const basis = p.windows["7d"]?.coveredSeconds >= 86400 ? "7d" : "24h";
-  const basisApr = p.windows[basis]?.apr ?? null;
+  const { label, apr } = planningApr(p);
   const targetNum = Number(target.replace(/[^0-9.]/g, ""));
-  const needed = basisApr && basisApr > 0 && targetNum > 0 ? targetNum / basisApr : null;
+  const yearly = apr && apr > 0 ? p.currentCapitalUsd * apr : null;
+  const needed = apr && apr > 0 && targetNum > 0 ? targetNum / apr : null;
 
+  if (data.open.length === 0) return null;
   return (
     <section className="mt-10">
-      <h2 className="text-lg font-semibold">Portfolio</h2>
+      <h2 className="text-lg font-semibold">Open positions</h2>
       <p className="mt-1 text-xs text-neutral-500">
-        Fees earned across all positions, with APR on time-weighted capital. Tracking since {formatDate(p.trackingStartedAt)}.
+        Fees earned by the {data.open.length === 1 ? "position open now" : `${data.open.length} positions open now`}, with APR on time-weighted capital. Since{" "}
+        {formatDate(p.trackingStartedAt)}.
       </p>
-      <div className="mt-3 overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-neutral-300 text-left text-neutral-600 dark:border-neutral-700 dark:text-neutral-400">
-              <th className="py-2 pr-4 font-medium">Window</th>
-              <th className="py-2 pr-4 text-right font-medium">Fees earned</th>
-              <th className="py-2 pr-4 text-right font-medium">Avg capital</th>
-              <th className="py-2 text-right font-medium">APR</th>
-            </tr>
-          </thead>
-          <tbody>
-            {["24h", "7d"].map((k) => (
-              <tr key={k} className="border-b border-neutral-200 dark:border-neutral-800">
-                <td className="py-2 pr-4">{k}</td>
-                <td className="py-2 pr-4 text-right tabular-nums">{usd(p.windows[k]?.earnedUsd ?? 0)}</td>
-                <td className="py-2 pr-4 text-right tabular-nums">{usd(p.windows[k]?.avgCapitalUsd ?? 0)}</td>
-                <td className="py-2 text-right tabular-nums">{aprText(p.windows[k], WINDOW_SECONDS[k])}</td>
-              </tr>
-            ))}
-            <tr className="border-b border-neutral-200 dark:border-neutral-800">
-              <td className="py-2 pr-4">Since tracking</td>
-              <td className="py-2 pr-4 text-right tabular-nums">{usd(p.sinceStart.earnedUsd)}</td>
-              <td className="py-2 pr-4 text-right tabular-nums">{usd(p.sinceStart.avgCapitalUsd)}</td>
-              <td className="py-2 text-right tabular-nums">{aprText(p.sinceStart)}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <WindowsTable p={p} sinceLabel="Since open" />
 
-      <div className="mt-4 flex flex-wrap items-center gap-2 text-sm">
-        <label htmlFor="target">Capital needed for</label>
-        <input
-          id="target"
-          value={target}
-          onChange={(e) => setTarget(e.target.value)}
-          inputMode="decimal"
-          className="w-28 rounded border border-neutral-300 bg-transparent px-2 py-1 text-right tabular-nums outline-none focus:border-neutral-500 dark:border-neutral-700"
-        />
-        <span>per year at the {basis} APR:</span>
-        <span className="font-semibold tabular-nums">{needed ? usd(needed) : "—"}</span>
+      <div className="mt-4 space-y-1 text-sm">
+        <div>
+          Your current <span className="font-semibold tabular-nums">{usd(p.currentCapitalUsd)}</span> at the {label} APR
+          {apr != null ? ` (${pct(apr, 0)})` : ""} earns about <span className="font-semibold tabular-nums">{yearly ? usd(yearly) : "—"}</span> per year.
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="target">For</label>
+          <input
+            id="target"
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            inputMode="decimal"
+            className="w-28 rounded border border-neutral-300 bg-transparent px-2 py-1 text-right tabular-nums outline-none focus:border-neutral-500 dark:border-neutral-700"
+          />
+          <span>per year you would need</span>
+          <span className="font-semibold tabular-nums">{needed ? usd(needed) : "—"}</span>
+        </div>
       </div>
+    </section>
+  );
+}
+
+/** Every position since tracking began, open and closed, as one strategy. */
+export function OverallPanel({ data }: { data: WalletAnalytics }) {
+  const p = data.portfolio;
+  return (
+    <section className="mt-10">
+      <h2 className="text-lg font-semibold">Overall</h2>
+      <p className="mt-1 text-xs text-neutral-500">
+        All positions since tracking began on {formatDate(p.trackingStartedAt)}, open and closed, with APR on the capital deployed at each moment.
+      </p>
+      <WindowsTable p={p} sinceLabel="Since tracking" />
     </section>
   );
 }
@@ -96,6 +119,16 @@ export function OpenPositionCards({ positions, asOf }: { positions: PositionAnal
 
 function PositionCard({ p }: { p: PositionAnalytics }) {
   const since = p.preExisting ? "since tracking" : "since open";
+  const deposits = p.entry.history.filter((h) => h.amountA * (h.price ?? 0) + h.amountB > 0).length;
+  const showAvg = p.entry.avgPrice != null && p.entry.price != null && Math.abs(p.entry.avgPrice / p.entry.price - 1) > 0.0005;
+  const priceChange = p.entry.price ? p.lastPrice / p.entry.price - 1 : null;
+  const collectedNote =
+    p.collectedUsd > 0
+      ? `${usd(p.collectedUsd)} collected` +
+        (p.preExisting && p.baselineUncollectedUsd > 0
+          ? ` (incl. ${usd(Math.min(p.collectedUsd, p.baselineUncollectedUsd))} from before tracking)`
+          : "")
+      : undefined;
   return (
     <div className="rounded border border-neutral-200 p-4 text-sm dark:border-neutral-800">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
@@ -108,13 +141,20 @@ function PositionCard({ p }: { p: PositionAnalytics }) {
         </div>
         <div className="text-xs text-neutral-500">
           {p.openedAtKnown ? `Opened ${formatDate(p.openedAt)}` : `First seen ${formatDate(p.openedAt)}`}
+          {p.entry.price != null ? ` at ${price(p.entry.price)}` : ""}
+          {showAvg ? ` · avg entry ${price(p.entry.avgPrice)} over ${deposits} deposits` : ""}
           {p.preExisting ? " · fees before tracking excluded" : ""} · {formatDuration(p.lifetime.coveredSeconds)} tracked
         </div>
       </div>
 
-      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-4">
+      <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-5">
         <Stat label="Value" value={usd(p.lastUsdValue)} />
-        <Stat label={`Fees earned ${since}`} value={usd(p.lifetime.earnedUsd)} sub={p.collectedUsd > 0 ? `${usd(p.collectedUsd)} collected` : undefined} />
+        <Stat
+          label="Price now"
+          value={price(p.lastPrice)}
+          sub={p.entry.price != null && priceChange != null ? `entry ${price(p.entry.price)} (${pctSigned(priceChange)})` : undefined}
+        />
+        <Stat label={`Fees earned ${since}`} value={usd(p.lifetime.earnedUsd)} sub={collectedNote} />
         <Stat label="Impermanent loss now" value={usdSigned(p.ilUsd)} sub={pctSigned(p.ilPct)} tone={gain(p.ilUsd)} />
         <Stat label={`Net ${since}`} value={usdSigned(p.netUsd)} sub="IL + fees" tone={gain(p.netUsd)} />
       </div>
@@ -169,6 +209,7 @@ function PositionCard({ p }: { p: PositionAnalytics }) {
                 </tr>
               </thead>
               <tbody>
+                {p.projections.entry && <ProjectionRow label={`Entry price ${price(p.projections.entry.price)}`} pr={p.projections.entry} p={p} />}
                 <ProjectionRow label={`Lower bound ${price(p.priceLower)}`} pr={p.projections.lower} p={p} />
                 <ProjectionRow label={`Now ${price(p.lastPrice)}`} pr={p.projections.current} p={p} />
                 <ProjectionRow label={`Upper bound ${price(p.priceUpper)}`} pr={p.projections.upper} p={p} />
