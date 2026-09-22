@@ -53,7 +53,6 @@ function planningRate(p: PortfolioAnalytics): { label: string; apr: number | nul
 /** The positions open right now: fees, expected pool cost, and what that means in dollars. */
 export function OpenPositionsPanel({ data }: { data: WalletAnalytics }) {
   const p = data.openPortfolio;
-  const [target, setTarget] = useState("50000");
   const { label, apr } = planningRate(p);
   if (data.open.length === 0) return null;
 
@@ -61,8 +60,6 @@ export function OpenPositionsPanel({ data }: { data: WalletAnalytics }) {
   const costPerDay = p.expectedCostPerDay; // fraction of capital per day, positive number
   const netPerDay = feePerDay != null && costPerDay != null ? feePerDay - costPerDay : null;
   const capital = p.currentCapitalUsd;
-  const targetNum = Number(target.replace(/[^0-9.]/g, ""));
-  const needed = netPerDay != null && netPerDay > 0 && targetNum > 0 ? targetNum / (netPerDay * 365) : null;
   const vol = data.market.dailyVol24h ?? data.market.dailyVol7d;
   const realised = data.history;
 
@@ -128,21 +125,7 @@ export function OpenPositionsPanel({ data }: { data: WalletAnalytics }) {
           </div>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <label htmlFor="target">For</label>
-          <input
-            id="target"
-            value={target}
-            onChange={(e) => setTarget(e.target.value)}
-            inputMode="decimal"
-            className="w-28 rounded border border-neutral-300 bg-transparent px-2 py-1 text-right tabular-nums outline-none focus:border-neutral-500 dark:border-neutral-700"
-          />
-          <span>a year net you would need</span>
-          <span className="font-semibold tabular-nums">{needed ? usd(needed) : "—"}</span>
-          {netPerDay != null && netPerDay <= 0 && targetNum > 0 && (
-            <span className="text-xs text-neutral-500">no amount of capital gets there while fees don&apos;t cover the expected pool cost</span>
-          )}
-        </div>
+        {netPerDay != null && <Calculator netPerDay={netPerDay} feePerDay={feePerDay!} costPerDay={costPerDay!} currentCapital={capital} />}
 
         <p className="mt-3 text-xs text-neutral-500">
           Expected pool cost is a model: the tighter the range and the more TAO moves, the more the pool trades against you. It applies while in range.
@@ -155,6 +138,69 @@ export function OpenPositionsPanel({ data }: { data: WalletAnalytics }) {
         </p>
       </div>
     </section>
+  );
+}
+
+/** Whole dollars from a typed string; empty when there are none. */
+const parseDollars = (text: string) => {
+  const digits = text.replace(/[^0-9]/g, "");
+  return digits ? Number(digits) : 0;
+};
+const formatDollars = (n: number) => (n > 0 ? n.toLocaleString("en-US") : "");
+
+function DollarInput({ id, value, onChange }: { id: string; value: number; onChange: (n: number) => void }) {
+  return (
+    <span className="inline-flex items-center rounded border border-neutral-300 bg-transparent px-2 focus-within:border-neutral-500 dark:border-neutral-700">
+      <span className="text-neutral-500">$</span>
+      <input
+        id={id}
+        value={formatDollars(value)}
+        onChange={(e) => onChange(parseDollars(e.target.value))}
+        inputMode="numeric"
+        placeholder="0"
+        className="w-28 bg-transparent py-1 pl-1 text-right tabular-nums outline-none"
+      />
+    </span>
+  );
+}
+
+/**
+ * Two-way planner on the net rate (fees minus expected pool cost): what a
+ * yearly income target needs in capital, and what an amount of capital earns.
+ */
+function Calculator({ netPerDay, feePerDay, costPerDay, currentCapital }: { netPerDay: number; feePerDay: number; costPerDay: number; currentCapital: number }) {
+  const [target, setTarget] = useState(50000);
+  const [capital, setCapital] = useState(Math.round(currentCapital));
+  const netPerYear = netPerDay * 365;
+  const needed = netPerYear > 0 && target > 0 ? target / netPerYear : null;
+
+  return (
+    <div className="mt-4 grid gap-4 border-t border-neutral-200 pt-4 sm:grid-cols-2 dark:border-neutral-800">
+      <div>
+        <div className="text-xs font-medium text-neutral-500">Income target</div>
+        <label htmlFor="target" className="mt-1 block">
+          To earn <DollarInput id="target" value={target} onChange={setTarget} /> a year after pool cost
+        </label>
+        <div className="mt-2">
+          you would need about{" "}
+          <span className="text-lg font-semibold tabular-nums">{needed != null ? usd(needed) : "—"}</span> in positions
+          {needed == null && target > 0 && <span className="block text-xs text-neutral-500">not reachable while fees don&apos;t cover the expected pool cost</span>}
+        </div>
+      </div>
+      <div>
+        <div className="text-xs font-medium text-neutral-500">Capital</div>
+        <label htmlFor="capital" className="mt-1 block">
+          With <DollarInput id="capital" value={capital} onChange={setCapital} /> in positions
+        </label>
+        <div className="mt-2">
+          you would earn about{" "}
+          <span className={`text-lg font-semibold tabular-nums ${gain(netPerDay)}`}>{usdSigned(capital * netPerYear)}</span> a year after pool cost
+          <span className="block text-xs text-neutral-500">
+            {usd(capital * feePerDay * 365)} in fees minus {usd(capital * costPerDay * 365)} of pool cost, or {usdSigned(capital * netPerDay)} a day
+          </span>
+        </div>
+      </div>
+    </div>
   );
 }
 
