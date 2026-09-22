@@ -148,7 +148,7 @@ export default function Home() {
         <>
           <OpenPositionsPanel data={analytics} />
           <OpenPositionCards positions={analytics.open} asOf={analytics.asOf} />
-          <ClosedPositionsTable positions={analytics.closed} />
+          <ClosedPositionsTable positions={analytics.closed} total={analytics.history.closedCount} />
           <OverallPanel data={analytics} />
         </>
       )}
@@ -167,7 +167,7 @@ function Results({ data, analytics }: { data: PositionsResponse; analytics: Wall
               <th className="py-2 pr-4 font-medium">Pool</th>
               <th className="py-2 pr-4 text-right font-medium">Value (USD)</th>
               <th className="py-2 pr-4 text-right font-medium">Uncollected fees (USD)</th>
-              {analytics && <th className="py-2 text-right font-medium">APR (24h)</th>}
+              {analytics && <th className="py-2 text-right font-medium">Fee APR (24h)</th>}
             </tr>
           </thead>
           <tbody>

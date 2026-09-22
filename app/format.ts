@@ -50,3 +50,10 @@ export function aprText(w: { apr: number | null; coveredSeconds: number } | unde
   }
   return base;
 }
+
+/** A daily rate, e.g. 0.0074 -> "0.74%/day". */
+export const perDay = (fraction: number | null | undefined, digits = 2) =>
+  fraction == null || !Number.isFinite(fraction) ? "—" : `${(fraction * 100).toFixed(digits)}%/day`;
+
+/** Signed daily rate with a leading sign. */
+export const perDaySigned = (fraction: number) => (fraction >= 0 ? "+" : "−") + perDay(Math.abs(fraction));

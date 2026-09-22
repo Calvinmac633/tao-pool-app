@@ -118,6 +118,26 @@ export function impliedPriceFromDeposit(deposit: Amounts, range: Range, decimals
   return x * x * Math.pow(10, decimalsA - decimalsB);
 }
 
+/**
+ * Whether `entry` can be the tokens this position held at some single price
+ * (or a sum of such deposits). If so, holding them always beats the position,
+ * so IL is never positive. A deposit that included a swap in the same
+ * transaction fails this, because the tokens paid are not the tokens held.
+ * The largest position-minus-hold gap is where the position holds exactly
+ * entry.amountA, or at a bound, so those three prices are checked.
+ */
+export function entryIsConsistent(liquidity: number, range: Range, entry: Amounts, decimalsA: number, decimalsB: number, tolerance = 0.002): boolean {
+  const sqrtUpper = Math.sqrt(toRawPrice(range.priceUpper, decimalsA, decimalsB));
+  const aRaw = entry.amountA * Math.pow(10, decimalsA);
+  const invSqrt = aRaw / liquidity + 1 / sqrtUpper;
+  const pStar = (1 / (invSqrt * invSqrt)) * Math.pow(10, decimalsA - decimalsB);
+  const candidates = [range.priceLower, range.priceUpper, Math.min(Math.max(pStar, range.priceLower), range.priceUpper)];
+  return candidates.every((price) => {
+    const r = impermanentLossAt(liquidity, range, entry, price, decimalsA, decimalsB);
+    return r.ilB <= tolerance * Math.max(r.hodlValueB, 1e-9);
+  });
+}
+
 export function isInRange(range: Range, price: number): boolean {
   return price >= range.priceLower && price < range.priceUpper;
 }

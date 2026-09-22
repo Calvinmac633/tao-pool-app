@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { amountsAtPrice, impermanentLossAt, impliedPriceFromDeposit, isInRange, tickToPrice } from "../clmm-math";
+import { amountsAtPrice, entryIsConsistent, impermanentLossAt, impliedPriceFromDeposit, isInRange, tickToPrice } from "../clmm-math";
 
 const close = (a: number, b: number, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol * Math.max(1, Math.abs(b)), `${a} != ${b}`);
 
@@ -75,4 +75,13 @@ test("a two-sided deposit's token ratio gives back the price it was made at", ()
 test("a single-sided deposit has no implied price", () => {
   assert.equal(impliedPriceFromDeposit({ amountA: 10, amountB: 0 }, range, 0, 0), null);
   assert.equal(impliedPriceFromDeposit({ amountA: 0, amountB: 500 }, range, 0, 0), null);
+});
+
+test("entry consistency accepts real compositions and sums of them, rejects swapped-in deposits", () => {
+  const a = amountsAtPrice(L, range, 225, 0, 0);
+  assert.equal(entryIsConsistent(L, range, a, 0, 0), true);
+  const b = amountsAtPrice(L, range, 300, 0, 0); // second deposit at another price, same liquidity added
+  assert.equal(entryIsConsistent(2 * L, range, { amountA: a.amountA + b.amountA, amountB: a.amountB + b.amountB }, 0, 0), true);
+  assert.equal(entryIsConsistent(L, range, { amountA: 0, amountB: a.amountA * 225 + a.amountB }, 0, 0), false);
+  assert.equal(entryIsConsistent(L, range, { amountA: 60, amountB: 30000 }, 0, 0), false); // too little A
 });

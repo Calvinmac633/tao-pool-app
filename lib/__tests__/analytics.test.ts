@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { analyzePortfolio, analyzePosition, windowStats, type PositionRow, type SnapshotRow } from "../analytics";
-import { amountsAtPrice } from "../clmm-math";
+import { analyzePortfolio, analyzePosition, summarizeHistory, windowStats, type PositionRow, type SnapshotRow } from "../analytics";
+import { amountsAtPrice, impermanentLossAt } from "../clmm-math";
 
 const close = (a: number, b: number, tol = 1e-9) => assert.ok(Math.abs(a - b) <= tol * Math.max(1, Math.abs(b)), `${a} != ${b}`);
 
@@ -115,14 +115,17 @@ test("deposit amounts from the open transaction become the IL baseline", () => {
   const range = { priceLower: 100, priceUpper: 400 };
   const a = amountsAtPrice(6000, range, 225, 0, 0); // 100 A, 30000 B
   const rows = [row(0, { ...a, usdValue: a.amountA * 225 + a.amountB, liquidity: "6000", ...range })];
-  // Deposited at a different price earlier: 120 A + 25500 B (worth 52500 at 225).
-  const opened = { ...position, openedAt: iso(-3), entryAmountA: 120, entryAmountB: 25500 };
+  // Deposited earlier at a lower price: the composition the position had at 204.
+  const deposit = amountsAtPrice(6000, range, 204, 0, 0);
+  const opened = { ...position, openedAt: iso(-3), entryAmountA: deposit.amountA, entryAmountB: deposit.amountB };
   const r = analyzePosition(opened, rows, opts(0))!.analytics;
   assert.equal(r.entry.source, "chain");
-  close(r.entry.amountA, 120);
-  close(r.entry.amountB, 25500);
-  close(r.ilUsd, 52500 - (120 * 225 + 25500)); // 0 here by construction
-  close(r.projections!.upper.hodlUsd, 120 * 400 + 25500);
+  assert.equal(r.entry.note, null);
+  close(r.entry.amountA, deposit.amountA);
+  close(r.entry.amountB, deposit.amountB);
+  close(r.ilUsd, impermanentLossAt(6000, range, deposit, 225, 0, 0).ilB);
+  assert.ok(r.ilUsd < 0);
+  close(r.projections!.upper.hodlUsd, deposit.amountA * 400 + deposit.amountB);
 });
 
 test("APR annualises earnings over time-weighted capital", () => {
@@ -262,4 +265,99 @@ test("portfolio coverage starts at the earliest known position open", () => {
   close(p.sinceStart.coveredSeconds, 900);
   close(p.sinceStart.earnedUsd, 2);
   close(p.sinceStart.avgCapitalUsd, 1000);
+});
+
+test("the pool-trade view is the same number as IL, and price movement is the entry tokens revalued", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a0 = amountsAtPrice(6000, range, 225, 0, 0); // 100 A + 30000 B
+  const a1 = amountsAtPrice(6000, range, 400, 0, 0); // 0 A + 60000 B
+  const rows = [
+    row(0, { ...a0, usdValue: a0.amountA * 225 + a0.amountB, liquidity: "6000", ...range }),
+    row(60, { ...a1, priceA: 400, usdValue: a1.amountA * 400 + a1.amountB, liquidity: "6000", ...range, feeAmountB: 50, feeUsd: 50 }),
+  ];
+  const opened = { ...position, openedAt: iso(-3), entryAmountA: 100, entryAmountB: 30000, deposits: [{ at: iso(-3), amountA: 100, amountB: 30000 }] };
+  const r = analyzePosition(opened, rows, opts(60))!.analytics;
+  assert.ok(r.poolTrade);
+  close(r.poolTrade.soldA, 100);
+  close(r.poolTrade.receivedB, 30000);
+  close(r.poolTrade.avgPrice!, 300);
+  close(r.poolTrade.costUsd, -10000); // sold 100 A at 300 when price ended at 400
+  close(r.ilUsd, -10000);
+  close(r.priceMoveUsd, 100 * (400 - 225)); // entry tokens: 100 A gained 175 each
+  close(r.totalUsd, 50 - 10000 + 17500);
+  close(r.rangeWidthPct!, 300);
+  close(r.inRangeFraction!, 1); // in range during the one tracked interval (price 225 at its start)
+});
+
+test("expected cost per day uses the volatility and the position's concentration", () => {
+  const range = { priceLower: 200, priceUpper: 250 };
+  const a = amountsAtPrice(6000, range, 225, 0, 0);
+  const rows = [row(0, { ...a, usdValue: a.amountA * 225 + a.amountB, liquidity: "6000", ...range })];
+  const r = analyzePosition(position, rows, { ...opts(0), dailyVol: 0.05 })!.analytics;
+  assert.ok(r.expectedCostPerDay! > 0);
+  const outOfRange = analyzePosition(position, [row(0, { ...a, priceA: 300, usdValue: 1000, liquidity: "6000", ...range })], { ...opts(0), dailyVol: 0.05 })!.analytics;
+  assert.equal(outOfRange.expectedCostPerDay, 0);
+});
+
+test("history summary totals closed positions and groups them by range width", () => {
+  const mk = (width: number, fees: number, il: number, hours: number, cap: number, inRange: number) => ({
+    lifetime: { earnedUsd: fees, avgCapitalUsd: cap, coveredSeconds: hours * 3600, apr: null },
+    ilUsd: il, netUsd: fees + il, priceMoveUsd: 5, rangeWidthPct: width, inRangeFraction: inRange,
+  }) as unknown as Parameters<typeof summarizeHistory>[0][number];
+  const h = summarizeHistory([mk(3, 10, -4, 24, 1000, 1), mk(4, 20, -6, 24, 1000, 0.5), mk(30, 5, -1, 48, 2000, 1)]);
+  assert.equal(h.closedCount, 3);
+  close(h.feesUsd, 35); close(h.poolCostUsd, -11); close(h.lpIncomeUsd, 24); close(h.priceMoveUsd, 15); close(h.totalUsd, 39);
+  close(h.capitalHours, 24000 + 24000 + 96000);
+  close(h.realisedCostPerDay!, (11 / (144000 * 3600)) * 86400);
+  assert.deepEqual(h.buckets.map((b) => [b.label, b.positions]), [["under 5%", 2], ["20% to 50%", 1]]);
+  const tight = h.buckets[0];
+  close(tight.feesUsd, 30); close(tight.poolCostUsd, -10); close(tight.lpIncomeUsd, 20);
+  close(tight.feePerDay!, (30 / 48000) * 24);
+  close(tight.inRangeFraction!, 0.75);
+});
+
+test("a deposit that included a swap is not used as the IL baseline", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const held = amountsAtPrice(6000, range, 225, 0, 0); // 100 A + 30000 B actually in the position
+  const rows = [row(0, { ...held, usdValue: held.amountA * 225 + held.amountB, liquidity: "6000", ...range })];
+  // Wallet paid only B (zap-style open): 52500 B, no A.
+  const opened = { ...position, openedAt: iso(-3), entryAmountA: 0, entryAmountB: 52500, deposits: [{ at: iso(-3), amountA: 0, amountB: 52500 }] };
+  const r = analyzePosition(opened, rows, opts(0))!.analytics;
+  assert.equal(r.entry.source, "snapshot");
+  assert.ok(r.entry.note);
+  close(r.entry.amountA, 100);
+  close(r.entry.amountB, 30000);
+  assert.ok(r.projections!.upper.ilUsd <= 0 && r.projections!.lower.ilUsd <= 0);
+  close(r.priceMoveUsd, 0); // paid 52500, tokens now worth 52500 at the same price
+});
+
+test("fee tokens reconcile exactly even when fees accrue in the volatile token", () => {
+  const rows = [
+    row(0, { feeAmountA: 0.1, feeUsd: 22.5 }),
+    row(5, { feeAmountA: 0.3, priceA: 300, feeUsd: 90 }),
+    row(10, { feeAmountA: 0.05, priceA: 400, feeUsd: 20 }), // collected 0.3, earned 0.05 since
+  ];
+  const r = analyzePosition(position, rows, opts(10))!.analytics;
+  const t = r.feeTokens;
+  close(t.earnedA, 0.1 + 0.2 + 0.05);
+  close(t.collectedA, 0.3);
+  close(t.uncollectedA + t.collectedA, t.baselineA + t.earnedA);
+});
+
+test("a partial withdrawal realises its share of IL and price move, and the totals match no withdrawal", () => {
+  const range = { priceLower: 100, priceUpper: 400 };
+  const a0 = amountsAtPrice(6000, range, 225, 0, 0); // 100 A + 30000 B
+  const a1 = amountsAtPrice(6000, range, 400, 0, 0); // 0 A + 60000 B
+  const a2 = amountsAtPrice(3000, range, 400, 0, 0); // half withdrawn: 0 A + 30000 B
+  const mk = (m: number, amt: { amountA: number; amountB: number }, priceA: number, liq: string) =>
+    row(m, { ...amt, priceA, usdValue: amt.amountA * priceA + amt.amountB, liquidity: liq, ...range });
+  const withdrawn = analyzePosition(position, [mk(0, a0, 225, "6000"), mk(5, a1, 400, "6000"), mk(10, a2, 400, "3000")], opts(10))!.analytics;
+  const kept = analyzePosition(position, [mk(0, a0, 225, "6000"), mk(5, a1, 400, "6000"), mk(10, a1, 400, "6000")], opts(10))!.analytics;
+  close(withdrawn.realisedIlUsd, -5000);
+  close(withdrawn.ilUsd, kept.ilUsd); // -10000 either way
+  close(withdrawn.priceMoveUsd, kept.priceMoveUsd); // 17500 either way
+  close(withdrawn.entry.amountA, 50);
+  close(withdrawn.entry.amountB, 15000);
+  assert.equal(withdrawn.entry.adjustments, 1);
+  assert.ok(withdrawn.projections!.upper.ilUsd <= 1e-6 && withdrawn.projections!.lower.ilUsd <= 1e-6);
 });

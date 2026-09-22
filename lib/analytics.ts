@@ -3,8 +3,9 @@
  * impermanent loss, projections at the range bounds, and portfolio totals.
  * No I/O here so everything is unit-testable.
  */
-import { amountsAtPrice, impermanentLossAt, impliedPriceFromDeposit, type Amounts, type Range } from "./clmm-math";
-import type { EntryEvent, PortfolioAnalytics, PositionAnalytics, Projection, WindowStats } from "./types";
+import { amountsAtPrice, entryIsConsistent, impermanentLossAt, impliedPriceFromDeposit, valueInB, type Amounts, type Range } from "./clmm-math";
+import { concentrationFactor, expectedCostPerDay } from "./volatility";
+import type { EntryEvent, HistorySummary, PortfolioAnalytics, PositionAnalytics, Projection, RangeBucket, WindowStats } from "./types";
 
 export type SnapshotRow = {
   takenAt: string; // ISO
@@ -76,7 +77,7 @@ export function usdPerB(row: SnapshotRow): number {
  * uncollected amount means a collection happened, in which case everything
  * showing now accrued since that collection.
  */
-function earnedBetween(prev: SnapshotRow, cur: SnapshotRow): { usd: number; collectedUsd: number } {
+function earnedBetween(prev: SnapshotRow, cur: SnapshotRow) {
   const dA = cur.feeAmountA - prev.feeAmountA;
   const dB = cur.feeAmountB - prev.feeAmountB;
   const collected = dA < -1e-12 || dB < -1e-12;
@@ -87,8 +88,10 @@ function earnedBetween(prev: SnapshotRow, cur: SnapshotRow): { usd: number; coll
   const dR = cur.rewardUsd - prev.rewardUsd;
   const rewardUsd = dR < -1e-9 ? cur.rewardUsd : Math.max(0, dR);
 
-  const collectedUsd = collected ? (prev.feeAmountA * prev.priceA + prev.feeAmountB) * usdPerB(prev) : 0;
-  return { usd: feeUsd + rewardUsd, collectedUsd };
+  const collectedA = collected ? prev.feeAmountA : 0;
+  const collectedB = collected ? prev.feeAmountB : 0;
+  const collectedUsd = collected ? (collectedA * prev.priceA + collectedB) * usdPerB(prev) : 0;
+  return { usd: feeUsd + rewardUsd, collectedUsd, earnedA, earnedB, collectedA, collectedB };
 }
 
 /** Aggregate intervals that overlap [from, to], pro-rating partial overlaps. */
@@ -123,6 +126,7 @@ type AnalyzeOptions = {
   now: number; // epoch seconds
   runTimes?: number[]; // epoch seconds of every successful run for the wallet, ascending
   intervalSeconds?: number; // configured snapshot interval
+  dailyVol?: number | null; // realised daily volatility, for the expected-cost model
 };
 
 const DEFAULT_INTERVAL_SECONDS = 300;
@@ -166,7 +170,20 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
   // Entry baseline for impermanent loss: the deposit from the open
   // transaction when known, else the tokens at the first snapshot. Adjusted
   // below whenever liquidity changes (an add or partial withdrawal).
-  const chainEntry = position.entryAmountA != null && position.entryAmountB != null;
+  const chainDeposit = position.entryAmountA != null && position.entryAmountB != null;
+  const firstRange: Range | null = first.priceLower != null && first.priceUpper != null ? { priceLower: first.priceLower, priceUpper: first.priceUpper } : null;
+  // A deposit that came with a swap in the same transaction is what you paid,
+  // not what the position held, and would make IL look positive. Only use it
+  // as the IL baseline when it is a valid composition of this position.
+  let entryNote: string | null = null;
+  let chainEntry = chainDeposit;
+  if (chainDeposit && firstRange && first.liquidity) {
+    const candidate = { amountA: position.entryAmountA!, amountB: position.entryAmountB! };
+    if (!entryIsConsistent(Number(first.liquidity), firstRange, candidate, decimalsA, decimalsB)) {
+      chainEntry = false;
+      entryNote = "the open transaction included a swap, so the tokens held at open are taken from the first snapshot";
+    }
+  }
   let entry: Amounts = chainEntry
     ? { amountA: position.entryAmountA!, amountB: position.entryAmountB! }
     : { amountA: first.amountA, amountB: first.amountB };
@@ -184,6 +201,19 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
   } else {
     history.push({ at: first.takenAt, amountA: entry.amountA, amountB: entry.amountB, price: first.priceA, source: "snapshot" });
   }
+  // Cost basis in B: what was paid, valued at the price it went in. When the
+  // IL baseline had to come from the first snapshot, the cost basis still
+  // comes from the chain deposits.
+  let entryValueB = history.reduce((sum, h) => sum + h.amountA * (h.price ?? first.priceA) + h.amountB, 0);
+  if (chainDeposit && !chainEntry) {
+    const paid = position.deposits && position.deposits.length > 0 ? position.deposits : [{ amountA: position.entryAmountA!, amountB: position.entryAmountB! }];
+    entryValueB = paid.reduce((sum, d) => sum + d.amountA * (priceOf(d) ?? first.priceA) + d.amountB, 0);
+  }
+  // Realised on partial withdrawals: that fraction of the position is closed
+  // at that moment, so its IL and price move are banked and the remaining
+  // entry scales down.
+  let realisedIlUsd = 0;
+  let realisedPriceMoveUsd = 0;
 
   // Fees showing at the first snapshot are only counted when we know how
   // long they took to accrue; otherwise they'd inflate the rate.
@@ -193,6 +223,16 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
 
   const intervals: Interval[] = [];
   let collectedUsd = 0;
+  const feeTokens = {
+    baselineA: preExisting ? first.feeAmountA : 0,
+    baselineB: preExisting ? first.feeAmountB : 0,
+    earnedA: preExisting ? 0 : first.feeAmountA,
+    earnedB: preExisting ? 0 : first.feeAmountB,
+    collectedA: 0,
+    collectedB: 0,
+    uncollectedA: last.feeAmountA,
+    uncollectedB: last.feeAmountB,
+  };
   if (accrualStart !== null) {
     const entryUsd = chainEntry ? (entry.amountA * first.priceA + entry.amountB) * usdPerB(first) : first.usdValue;
     intervals.push({
@@ -203,20 +243,48 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     });
   }
 
+  let inRangeSeconds = 0;
+  let rangeKnownSeconds = 0;
   for (let i = 1; i < rows.length; i++) {
     const prev = rows[i - 1];
     const cur = rows[i];
-    const { usd, collectedUsd: c } = earnedBetween(prev, cur);
-    collectedUsd += c;
-    intervals.push({ start: toSec(prev.takenAt), end: toSec(cur.takenAt), earnedUsd: usd, capitalUsd: prev.usdValue });
+    const e = earnedBetween(prev, cur);
+    collectedUsd += e.collectedUsd;
+    feeTokens.earnedA += e.earnedA;
+    feeTokens.earnedB += e.earnedB;
+    feeTokens.collectedA += e.collectedA;
+    feeTokens.collectedB += e.collectedB;
+    intervals.push({ start: toSec(prev.takenAt), end: toSec(cur.takenAt), earnedUsd: e.usd, capitalUsd: prev.usdValue });
+    if (prev.priceLower != null && prev.priceUpper != null) {
+      const dt = toSec(cur.takenAt) - toSec(prev.takenAt);
+      rangeKnownSeconds += dt;
+      if (prev.priceA >= prev.priceLower && prev.priceA < prev.priceUpper) inRangeSeconds += dt;
+    }
 
     if (cur.liquidity && prev.liquidity && cur.liquidity !== prev.liquidity && cur.priceLower && cur.priceUpper) {
       const range: Range = { priceLower: cur.priceLower, priceUpper: cur.priceUpper };
-      const expected = amountsAtPrice(Number(prev.liquidity), range, cur.priceA, decimalsA, decimalsB);
-      const deltaA = cur.amountA - expected.amountA;
-      const deltaB = cur.amountB - expected.amountB;
-      entry = { amountA: entry.amountA + deltaA, amountB: entry.amountB + deltaB };
-      history.push({ at: cur.takenAt, amountA: deltaA, amountB: deltaB, price: cur.priceA, source: "snapshot" });
+      const lOld = Number(prev.liquidity);
+      const lNew = Number(cur.liquidity);
+      if (lNew > lOld) {
+        // Liquidity added: the extra tokens, at this price, join the entry.
+        const expected = amountsAtPrice(lOld, range, cur.priceA, decimalsA, decimalsB);
+        const deltaA = cur.amountA - expected.amountA;
+        const deltaB = cur.amountB - expected.amountB;
+        entry = { amountA: entry.amountA + deltaA, amountB: entry.amountB + deltaB };
+        entryValueB += deltaA * cur.priceA + deltaB;
+        history.push({ at: cur.takenAt, amountA: deltaA, amountB: deltaB, price: cur.priceA, source: "snapshot" });
+      } else {
+        // Liquidity removed: that fraction of the position is closed now.
+        const f = 1 - lNew / lOld;
+        const positionB = valueInB(amountsAtPrice(lOld, range, cur.priceA, decimalsA, decimalsB), cur.priceA);
+        const holdB = entry.amountA * cur.priceA + entry.amountB;
+        const uB = usdPerB(cur);
+        realisedIlUsd += f * (positionB - holdB) * uB;
+        realisedPriceMoveUsd += f * (holdB - entryValueB) * uB;
+        history.push({ at: cur.takenAt, amountA: -f * entry.amountA, amountB: -f * entry.amountB, price: cur.priceA, source: "snapshot" });
+        entry = { amountA: entry.amountA * (1 - f), amountB: entry.amountB * (1 - f) };
+        entryValueB *= 1 - f;
+      }
       capitalChanges++;
     }
   }
@@ -248,8 +316,8 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
   // Impermanent loss now, and projected at the entry price and range bounds.
   const usdB = usdPerB(last);
   const hodlUsd = (entry.amountA * last.priceA + entry.amountB) * usdB;
-  let ilUsd = last.usdValue - hodlUsd;
-  let ilPct = hodlUsd > 0 ? ilUsd / hodlUsd : 0;
+  let currentIlUsd = last.usdValue - hodlUsd;
+  let ilPct = hodlUsd > 0 ? currentIlUsd / hodlUsd : 0;
 
   let projections: PositionAnalytics["projections"] = null;
   if (last.liquidity && range) {
@@ -274,10 +342,32 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     };
     // Use the closed-form value for the headline too, so it agrees with the
     // "now" projection and is exactly zero at open instead of API noise.
-    ilUsd = projections.current.ilUsd;
+    currentIlUsd = projections.current.ilUsd;
     ilPct = projections.current.ilPct;
   }
+  const ilUsd = currentIlUsd + realisedIlUsd;
   const netUsd = ilUsd + lifetime.earnedUsd;
+
+  // Profit split. Entry tokens valued at the price they went in, versus at
+  // the last price, is the part of the result that came from price moving.
+  const priceMoveUsd = hodlUsd - entryValueB * usdB + realisedPriceMoveUsd;
+  const totalUsd = netUsd + priceMoveUsd;
+
+  // The pool's net trade between entry and now: the same thing as IL, seen
+  // as "sold X TAO at an average price of Y".
+  const soldA = entry.amountA - last.amountA;
+  const receivedB = last.amountB - entry.amountB;
+  const poolTrade = Math.abs(soldA) > 1e-9
+    ? { soldA, receivedB, avgPrice: receivedB / soldA > 0 ? receivedB / soldA : null, lastPrice: last.priceA, costUsd: currentIlUsd }
+    : null;
+
+  const rangeWidthPct = range ? (range.priceUpper / range.priceLower - 1) * 100 : null;
+  const inRangeFraction = rangeKnownSeconds > 0 ? inRangeSeconds / rangeKnownSeconds : null;
+  let expectedCost: number | null = null;
+  if (range && opts.dailyVol != null) {
+    const factor = concentrationFactor(range, last.priceA);
+    expectedCost = factor == null ? 0 : expectedCostPerDay(opts.dailyVol, factor);
+  }
 
   const analytics: PositionAnalytics = {
     positionId: position.positionId,
@@ -298,12 +388,14 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     lastUncollectedUsd: last.feeUsd + last.rewardUsd,
     baselineUncollectedUsd,
     collectedUsd,
+    feeTokens,
     entry: {
       amountA: entry.amountA,
       amountB: entry.amountB,
       usd: hodlUsd,
       adjustments: capitalChanges,
       source: chainEntry ? "chain" : "snapshot",
+      note: entryNote,
       price: entryPrice,
       avgPrice: avgEntryPrice,
       history,
@@ -312,7 +404,14 @@ export function analyzePosition(position: PositionRow, rowsIn: SnapshotRow[], op
     windows,
     ilUsd,
     ilPct,
+    realisedIlUsd,
     netUsd,
+    priceMoveUsd,
+    totalUsd,
+    poolTrade,
+    rangeWidthPct,
+    inRangeFraction,
+    expectedCostPerDay: expectedCost,
     projections,
   };
   return { analytics, intervals };
@@ -370,5 +469,64 @@ export function analyzePortfolio(positionIntervals: Interval[][], rows: Snapshot
     currentCapitalUsd: runTimes.length ? (capitalByRun.get(runTimes[runTimes.length - 1]) ?? 0) : 0,
     windows,
     sinceStart,
+    expectedCostPerDay: null,
+  };
+}
+
+export const RANGE_BUCKETS: { label: string; minPct: number; maxPct: number | null }[] = [
+  { label: "under 5%", minPct: 0, maxPct: 5 },
+  { label: "5% to 10%", minPct: 5, maxPct: 10 },
+  { label: "10% to 20%", minPct: 10, maxPct: 20 },
+  { label: "20% to 50%", minPct: 20, maxPct: 50 },
+  { label: "over 50%", minPct: 50, maxPct: null },
+];
+
+/** Totals over every closed position, plus a breakdown by range width. */
+export function summarizeHistory(closed: PositionAnalytics[]): HistorySummary {
+  const buckets: RangeBucket[] = RANGE_BUCKETS.map((b) => ({
+    ...b, positions: 0, capitalHours: 0, feesUsd: 0, poolCostUsd: 0, lpIncomeUsd: 0, feePerDay: null, costPerDay: null, inRangeFraction: null,
+  }));
+  const inRangeWeighted = buckets.map(() => ({ sum: 0, weight: 0 }));
+  let feesUsd = 0, poolCostUsd = 0, priceMoveUsd = 0, capitalSeconds = 0;
+
+  for (const a of closed) {
+    const capSec = a.lifetime.avgCapitalUsd * a.lifetime.coveredSeconds;
+    feesUsd += a.lifetime.earnedUsd;
+    poolCostUsd += a.ilUsd;
+    priceMoveUsd += a.priceMoveUsd;
+    capitalSeconds += capSec;
+    if (a.rangeWidthPct == null) continue;
+    const idx = buckets.findIndex((b) => a.rangeWidthPct! >= b.minPct && (b.maxPct == null || a.rangeWidthPct! < b.maxPct));
+    if (idx < 0) continue;
+    const b = buckets[idx];
+    b.positions++;
+    b.capitalHours += capSec / 3600;
+    b.feesUsd += a.lifetime.earnedUsd;
+    b.poolCostUsd += a.ilUsd;
+    b.lpIncomeUsd += a.netUsd;
+    if (a.inRangeFraction != null) {
+      inRangeWeighted[idx].sum += a.inRangeFraction * a.lifetime.coveredSeconds;
+      inRangeWeighted[idx].weight += a.lifetime.coveredSeconds;
+    }
+  }
+  buckets.forEach((b, i) => {
+    if (b.capitalHours > 0) {
+      b.feePerDay = (b.feesUsd / b.capitalHours) * 24;
+      b.costPerDay = (-b.poolCostUsd / b.capitalHours) * 24;
+    }
+    if (inRangeWeighted[i].weight > 0) b.inRangeFraction = inRangeWeighted[i].sum / inRangeWeighted[i].weight;
+  });
+
+  return {
+    closedCount: closed.length,
+    feesUsd,
+    poolCostUsd,
+    lpIncomeUsd: feesUsd + poolCostUsd,
+    priceMoveUsd,
+    totalUsd: feesUsd + poolCostUsd + priceMoveUsd,
+    capitalHours: capitalSeconds / 3600,
+    realisedCostPerDay: capitalSeconds > 0 ? (-poolCostUsd / capitalSeconds) * 86400 : null,
+    realisedFeePerDay: capitalSeconds > 0 ? (feesUsd / capitalSeconds) * 86400 : null,
+    buckets: buckets.filter((b) => b.positions > 0),
   };
 }

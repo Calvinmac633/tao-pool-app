@@ -27,10 +27,16 @@ function check(name: string, ok: boolean, detail: string) {
 function checkPosition(a: PositionAnalytics) {
   console.log(`${a.closedAt ? "closed" : "open  "} ${a.positionId.slice(0, 8)} ${a.poolName}  value ${f(a.lastUsdValue)}  price ${f(a.lastPrice)}`);
 
-  // Everything that ever showed as uncollected is either still uncollected or was collected.
+  // Everything that ever showed as uncollected is either still uncollected or
+  // was collected. Checked per token, where it is exact; USD figures differ
+  // slightly because they are valued at different snapshots' prices.
+  const t = a.feeTokens;
+  const okA = Math.abs(t.uncollectedA + t.collectedA - (t.baselineA + t.earnedA)) < 1e-6;
+  const okB = Math.abs(t.uncollectedB + t.collectedB - (t.baselineB + t.earnedB)) < 1e-6;
+  check("fee reconciliation (tokens)", okA && okB, `${a.symbolA}: ${t.uncollectedA.toFixed(6)} + ${t.collectedA.toFixed(6)} = ${t.baselineA.toFixed(6)} + ${t.earnedA.toFixed(6)}; ${a.symbolB}: ${t.uncollectedB.toFixed(6)} + ${t.collectedB.toFixed(6)} = ${t.baselineB.toFixed(6)} + ${t.earnedB.toFixed(6)}`);
   const lhs = a.lastUncollectedUsd + a.collectedUsd;
   const rhs = a.baselineUncollectedUsd + a.lifetime.earnedUsd;
-  check("fee reconciliation", Math.abs(lhs - rhs) < 0.05, `uncollected ${f(a.lastUncollectedUsd)} + collected ${f(a.collectedUsd)} = ${f(lhs)} vs baseline ${f(a.baselineUncollectedUsd)} + earned ${f(a.lifetime.earnedUsd)} = ${f(rhs)}`);
+  check("fee reconciliation (USD, within 3%)", Math.abs(lhs - rhs) <= 0.03 * Math.max(lhs, rhs, 1), `uncollected ${f(a.lastUncollectedUsd)} + collected ${f(a.collectedUsd)} = ${f(lhs)} vs baseline ${f(a.baselineUncollectedUsd)} + earned ${f(a.lifetime.earnedUsd)} = ${f(rhs)}`);
 
   // APR is earned over time-weighted capital, annualised over the covered time.
   const w = a.closedAt ? a.lifetime : a.windows["24h"];
@@ -41,11 +47,11 @@ function checkPosition(a: PositionAnalytics) {
 
   // Impermanent loss can never favour the LP; allow a little API pricing noise.
   const tol = Math.max(1, a.lastUsdValue * 0.001);
-  check("IL not positive", a.ilUsd <= tol, `IL ${f(a.ilUsd)} (${(a.ilPct * 100).toFixed(2)}%), entry ${a.entry.source}${a.entry.adjustments ? `, ${a.entry.adjustments} adjustment(s)` : ""}`);
+  check("IL not positive", a.ilUsd <= tol, `IL ${f(a.ilUsd)} (${(a.ilPct * 100).toFixed(2)}%), entry ${a.entry.source}${a.entry.note ? ` (${a.entry.note})` : ""}${a.entry.adjustments ? `, ${a.entry.adjustments} adjustment(s)` : ""}`);
   if (a.projections) {
     const { entry, lower, upper, current } = a.projections;
     check("bound projections not positive", lower.ilUsd <= tol && upper.ilUsd <= tol, `lower ${f(lower.ilUsd)}, upper ${f(upper.ilUsd)}`);
-    check("headline IL matches projection", Math.abs(a.ilUsd - current.ilUsd) < 0.01, `headline ${f(a.ilUsd)}, now-row ${f(current.ilUsd)}`);
+    check("headline IL matches projection", Math.abs(a.ilUsd - a.realisedIlUsd - current.ilUsd) < 0.01, `headline ${f(a.ilUsd)} (realised on withdrawals ${f(a.realisedIlUsd)}), now-row ${f(current.ilUsd)}`);
     if (entry && a.entry.history.length === 1) {
       check("IL is zero at the entry price", Math.abs(entry.ilUsd) < tol, `${f(entry.ilUsd)} at ${f(entry.price)}`);
     }

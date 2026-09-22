@@ -1,6 +1,7 @@
 import { getDb } from "./db";
-import { analyzePortfolio, analyzePosition, type Interval, type PositionRow, type SnapshotRow } from "./analytics";
+import { analyzePortfolio, analyzePosition, summarizeHistory, type Interval, type PositionRow, type SnapshotRow } from "./analytics";
 import { getIntervalMinutes } from "./snapshot";
+import { dailyVolatility } from "./volatility";
 import type { PositionAnalytics, WalletAnalytics } from "./types";
 
 const CLOSED_LIMIT = 20;
@@ -66,7 +67,12 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
   const runTimes = runsRes.rows.map((r) => new Date(String(r.finished_at)).getTime() / 1000);
   const trackingStartedAt = runsRes.rows.length ? String(runsRes.rows[0].finished_at) : (rows[0]?.takenAt ?? new Date(nowMs).toISOString());
   const now = nowMs / 1000;
-  const analyzeOpts = { trackingStartedAt, now, runTimes, intervalSeconds: getIntervalMinutes() * 60 };
+  // Realised volatility from the price recorded with every snapshot.
+  const pricePoints = rows.map((r) => ({ t: new Date(r.takenAt).getTime() / 1000, price: r.priceA }));
+  const vol24 = dailyVolatility(pricePoints, 24 * 3600, now);
+  const vol7d = dailyVolatility(pricePoints, 7 * 24 * 3600, now);
+  const dailyVol = vol24?.dailyVol ?? vol7d?.dailyVol ?? null;
+  const analyzeOpts = { trackingStartedAt, now, runTimes, intervalSeconds: getIntervalMinutes() * 60, dailyVol };
 
   const open: PositionAnalytics[] = [];
   const closed: PositionAnalytics[] = [];
@@ -88,13 +94,21 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
   open.sort((a, b) => b.lastUsdValue - a.lastUsdValue);
   closed.sort((a, b) => (b.closedAt ?? "").localeCompare(a.closedAt ?? ""));
 
+  // Expected cost of the open set: capital-weighted across open positions.
+  const openPortfolio = analyzePortfolio(openIntervals, rows.filter((r) => openIds.has(r.positionId)), now);
+  const weighted = open.filter((a) => a.expectedCostPerDay != null);
+  const weight = weighted.reduce((s, a) => s + a.lastUsdValue, 0);
+  openPortfolio.expectedCostPerDay = weight > 0 ? weighted.reduce((s, a) => s + a.expectedCostPerDay! * a.lastUsdValue, 0) / weight : null;
+
   return {
     wallet,
     asOf: rows.length ? rows[rows.length - 1].takenAt : null,
     open,
     closed: closed.slice(0, CLOSED_LIMIT),
-    openPortfolio: analyzePortfolio(openIntervals, rows.filter((r) => openIds.has(r.positionId)), now),
+    openPortfolio,
     portfolio: analyzePortfolio(intervals, rows, now),
+    market: { dailyVol24h: vol24?.dailyVol ?? null, dailyVol7d: vol7d?.dailyVol ?? null, points: pricePoints.length },
+    history: summarizeHistory(closed),
   };
 }
 
