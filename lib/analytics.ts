@@ -38,6 +38,7 @@ export type PositionRow = {
   entryAmountA: number | null; // deposited at open, when found
   entryAmountB: number | null;
   deposits: { at: string; amountA: number; amountB: number }[] | null; // per-transaction deposits, when found
+  historyWithdrawals: number | null; // collections/withdrawals between the open and the first snapshot, when known
 };
 
 export const WINDOWS: Record<string, number> = {
@@ -137,20 +138,23 @@ const RUN_TOLERANCE_SECONDS = 60;
  * Returns the time they started accruing, or null if unknown (in which case
  * they are excluded from earnings rather than inflating the rate).
  *
- * - Opened after the previous run (known from the open transaction): the
- *   fees accrued since the open, so they count over that exact time.
+ * - Open time known and nothing was collected or withdrawn between the open
+ *   and the first snapshot (from the chain): the fees are exactly as old as
+ *   the position, so they count from the open.
+ * - Open time known and after the previous run: likewise, counted from the open.
  * - No open time known but the previous run was recent: the position opened
  *   somewhere in between; assume the earliest moment, which is conservative.
- * - Anything else (first ever run, or a tracking gap the open falls inside):
- *   unknown age.
+ * - Anything else: unknown age.
  */
 function feeAgeStart(position: PositionRow, firstSec: number, opts: AnalyzeOptions): number | null {
   const prevRun = (opts.runTimes ?? []).filter((t) => t < firstSec - 1).pop();
-  if (prevRun === undefined) return null;
   if (position.openedAt) {
     const openedSec = toSec(position.openedAt);
-    return openedSec >= prevRun - RUN_TOLERANCE_SECONDS ? Math.min(openedSec, firstSec) : null;
+    if (position.historyWithdrawals === 0) return Math.min(openedSec, firstSec);
+    if (prevRun !== undefined && openedSec >= prevRun - RUN_TOLERANCE_SECONDS) return Math.min(openedSec, firstSec);
+    return null;
   }
+  if (prevRun === undefined) return null;
   const interval = opts.intervalSeconds ?? DEFAULT_INTERVAL_SECONDS;
   return firstSec - prevRun <= interval * 2 + RUN_TOLERANCE_SECONDS ? prevRun : null;
 }

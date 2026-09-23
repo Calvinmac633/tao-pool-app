@@ -43,6 +43,7 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     entryAmountA: r.entry_amount_a == null ? null : Number(r.entry_amount_a),
     entryAmountB: r.entry_amount_b == null ? null : Number(r.entry_amount_b),
     deposits: parseDeposits(r.deposits_json),
+    historyWithdrawals: r.history_withdrawals == null ? null : Number(r.history_withdrawals),
   }));
 
   const rows: SnapshotRow[] = snapshotsRes.rows.map((r) => ({

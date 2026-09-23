@@ -146,7 +146,7 @@ async function backfillOpenHistory(wallet: string, open: Position[]): Promise<nu
   const db = await getDb();
   const pending = await db.execute({
     sql: `SELECT position_id, first_seen_at FROM positions
-          WHERE wallet = ? AND closed_at IS NULL AND opened_at IS NULL
+          WHERE wallet = ? AND closed_at IS NULL AND (opened_at IS NULL OR history_withdrawals IS NULL)
             AND COALESCE(history_attempts, 0) < ?`,
     args: [wallet, MAX_HISTORY_ATTEMPTS],
   });
@@ -173,11 +173,12 @@ async function backfillOpenHistory(wallet: string, open: Position[]): Promise<nu
                 open_signature = COALESCE(?, open_signature),
                 entry_amount_a = COALESCE(?, entry_amount_a),
                 entry_amount_b = COALESCE(?, entry_amount_b),
-                deposits_json = COALESCE(?, deposits_json)
+                deposits_json = COALESCE(?, deposits_json),
+                history_withdrawals = COALESCE(?, history_withdrawals)
               WHERE position_id = ?`,
         args: [
           result?.openedAt ?? null, result?.signature ?? null, result?.depositA ?? null, result?.depositB ?? null,
-          result ? JSON.stringify(result.deposits) : null, p.positionId,
+          result ? JSON.stringify(result.deposits) : null, result ? result.withdrawals : null, p.positionId,
         ],
       });
       if (result) found++;

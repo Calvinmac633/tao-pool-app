@@ -1,8 +1,8 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import type { Position, PositionsResponse, TrackingStatus, WalletAnalytics } from "@/lib/types";
-import { ClosedPositionsTable, LedgerPanel, OpenPositionCards, OpenPositionsPanel, OverallPanel } from "./analytics-panels";
+import { ClosedPositionsTable, DangerZone, LedgerPanel, OpenPositionCards, OpenPositionsPanel, OverallPanel } from "./analytics-panels";
 import { aprText, formatAgo, formatDate, price, usd, WINDOW_SECONDS } from "./format";
 
 const NETWORK_ERROR = "Couldn't reach the network. Try again.";
@@ -48,15 +48,23 @@ export default function Home() {
     [applyTracking],
   );
 
-  // Load tracking status on mount.
+  // Load tracking status on mount, then load the tracked wallet straight away.
+  const autoLoaded = useRef(false);
   useEffect(() => {
     let cancelled = false;
     loadTrackingStatus().then((status) => {
-      if (!cancelled) applyTracking(status);
+      if (cancelled) return;
+      applyTracking(status);
+      if (status?.trackedWallet && !autoLoaded.current) {
+        autoLoaded.current = true;
+        void loadPositions(status.trackedWallet, status.trackedWallet);
+      }
     });
     return () => {
       cancelled = true;
     };
+    // loadPositions reads current state; running once on mount is intended.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applyTracking]);
 
   const isTrackedWallet = !!tracking?.trackedWallet && loadedWallet === tracking.trackedWallet;
@@ -67,7 +75,10 @@ export default function Home() {
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const address = wallet.trim();
+    await loadPositions(wallet.trim());
+  }
+
+  async function loadPositions(address: string, trackedWallet: string | null = tracking?.trackedWallet ?? null) {
     if (!address || loading) return;
 
     setLoading(true);
@@ -84,8 +95,8 @@ export default function Home() {
       }
       setResult(body as PositionsResponse);
       setLoadedWallet(address);
-      if (tracking?.trackedWallet === address) {
-        await refreshAnalytics(address);
+      if (trackedWallet === address) {
+        await Promise.all([refreshAnalytics(address), refreshTracking()]);
       }
     } catch {
       setError(NETWORK_ERROR);
@@ -116,7 +127,7 @@ export default function Home() {
           disabled={loading || !wallet.trim()}
           className="rounded bg-neutral-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50 dark:bg-neutral-100 dark:text-neutral-900"
         >
-          {loading ? "Loading…" : "Load positions"}
+          {loading ? "Loading…" : loadedWallet && wallet.trim() === loadedWallet ? "Refresh" : "Load positions"}
         </button>
       </form>
 
@@ -152,6 +163,15 @@ export default function Home() {
           <OverallPanel data={analytics} />
           <LedgerPanel data={analytics} symbolA={result?.positions[0]?.symbolA ?? "TAO"} symbolB={result?.positions[0]?.symbolB ?? "USDC"} />
         </>
+      )}
+
+      {isTrackedWallet && loadedWallet && (
+        <DangerZone
+          onReset={async () => {
+            await refreshTracking();
+            await refreshAnalytics(loadedWallet);
+          }}
+        />
       )}
     </main>
   );

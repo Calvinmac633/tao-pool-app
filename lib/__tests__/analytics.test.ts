@@ -23,6 +23,7 @@ const position: PositionRow = {
   entryAmountA: null,
   entryAmountB: null,
   deposits: null,
+  historyWithdrawals: null,
 };
 
 function row(minutes: number, o: Partial<SnapshotRow> = {}): SnapshotRow {
@@ -360,4 +361,17 @@ test("a partial withdrawal realises its share of IL and price move, and the tota
   close(withdrawn.entry.amountB, 15000);
   assert.equal(withdrawn.entry.adjustments, 1);
   assert.ok(withdrawn.projections!.upper.ilUsd <= 1e-6 && withdrawn.projections!.lower.ilUsd <= 1e-6);
+});
+
+test("on the first ever run, a position with a known open and no prior collections counts its fees from the open", () => {
+  const rows = [row(0, { feeAmountB: 50, feeUsd: 50 }), row(5, { feeAmountB: 51, feeUsd: 51 })];
+  const opened = { ...position, openedAt: iso(-600), historyWithdrawals: 0 }; // opened 10 hours earlier
+  const r = analyzePosition(opened, rows, { trackingStartedAt: iso(0), now: T0 + 300, runTimes: [T0, T0 + 300] })!.analytics;
+  assert.equal(r.preExisting, false);
+  close(r.lifetime.earnedUsd, 51);
+  close(r.lifetime.coveredSeconds, 605 * 60);
+  // ...but if something was collected before we started watching, the age is unknown again.
+  const collected = analyzePosition({ ...opened, historyWithdrawals: 1 }, rows, { trackingStartedAt: iso(0), now: T0 + 300, runTimes: [T0, T0 + 300] })!.analytics;
+  assert.equal(collected.preExisting, true);
+  close(collected.lifetime.earnedUsd, 1);
 });

@@ -12,6 +12,7 @@ export type PositionOpen = {
   depositA: number | null; // total paid in across all transactions up to `before`; null if never touched
   depositB: number | null;
   deposits: DepositTx[]; // each transaction that paid tokens in, oldest first
+  withdrawals: number; // transactions up to `before` in which the wallet received tokens (collections or withdrawals)
   transactions: number; // transactions inspected
 };
 
@@ -60,6 +61,13 @@ export function depositsFromBalances(
   return { depositA: delta(mintA), depositB: delta(mintB) };
 }
 
+/** Whether the wallet's balance of either token went up in a transaction (a collection or withdrawal). */
+export function walletReceived(pre: TokenBalance[], post: TokenBalance[], wallet: string, mintA: string, mintB: string): boolean {
+  const sum = (list: TokenBalance[], mint: string) =>
+    list.filter((b) => b.owner === wallet && b.mint === mint).reduce((acc, b) => acc + Number(b.uiTokenAmount.uiAmountString ?? b.uiTokenAmount.uiAmount ?? 0), 0);
+  return sum(post, mintA) - sum(pre, mintA) > 1e-9 || sum(post, mintB) - sum(pre, mintB) > 1e-9;
+}
+
 /** Sum per-transaction deposits; a mint stays null only if no transaction touched it. */
 export function accumulateDeposits(deposits: Deposit[]): Deposit {
   const add = (a: number | null, b: number | null) => (a == null && b == null ? null : (a ?? 0) + (b ?? 0));
@@ -91,12 +99,14 @@ export async function lookupPositionOpen(
   const relevant = sigs.filter((s) => s.blockTime != null && s.blockTime <= beforeSec).slice(0, MAX_TRANSACTIONS);
   const deposits: Deposit[] = [];
   const depositTxs: DepositTx[] = [];
+  let withdrawals = 0;
   for (const s of relevant) {
     try {
       const tx = await connection.getParsedTransaction(s.signature, { maxSupportedTransactionVersion: 0 });
       if (tx?.meta) {
         const d = depositsFromBalances(tx.meta.preTokenBalances ?? [], tx.meta.postTokenBalances ?? [], wallet, mintA, mintB);
         deposits.push(d);
+        if (walletReceived(tx.meta.preTokenBalances ?? [], tx.meta.postTokenBalances ?? [], wallet, mintA, mintB)) withdrawals++;
         if ((d.depositA ?? 0) > 0 || (d.depositB ?? 0) > 0) {
           depositTxs.push({ at: new Date(s.blockTime! * 1000).toISOString(), signature: s.signature, amountA: d.depositA ?? 0, amountB: d.depositB ?? 0 });
         }
@@ -111,6 +121,7 @@ export async function lookupPositionOpen(
     signature: oldest.signature,
     ...accumulateDeposits(deposits),
     deposits: depositTxs,
+    withdrawals,
     transactions: relevant.length,
   };
 }

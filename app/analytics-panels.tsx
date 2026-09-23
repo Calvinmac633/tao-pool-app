@@ -714,3 +714,45 @@ function ActivityTable({ entries, symbolA, symbolB }: { entries: LedgerEntry[]; 
     </div>
   );
 }
+
+// ---- Danger zone ----
+
+/** Erases all tracked history after the user types DELETE to confirm. */
+export function DangerZone({ onReset }: { onReset: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function reset() {
+    const typed = window.prompt("This erases every snapshot, position, and ledger record the tracker has stored. It cannot be undone.\n\nType DELETE to confirm.");
+    if (typed !== "DELETE") return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch("/api/reset", { method: "POST" });
+      const body = await res.json().catch(() => null);
+      setMessage(res.ok ? "History erased. Tracking starts again from now." : body?.error ?? "Couldn't reset the history.");
+      if (res.ok) await onReset();
+    } catch {
+      setMessage("Couldn't reach the server.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="mt-16 border-t border-neutral-200 pt-6 dark:border-neutral-800">
+      <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-500">
+        <button
+          type="button"
+          onClick={reset}
+          disabled={busy}
+          className="rounded border border-red-300 px-2 py-1 text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-900 dark:text-red-400 dark:hover:bg-red-950"
+        >
+          {busy ? "Erasing…" : "Delete all tracked history"}
+        </button>
+        <span>Starts tracking over from now. Positions on-chain are untouched.</span>
+        {message && <span className="text-neutral-700 dark:text-neutral-300">{message}</span>}
+      </div>
+    </section>
+  );
+}

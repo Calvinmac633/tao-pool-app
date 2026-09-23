@@ -92,6 +92,18 @@ Each run also records the wallet's loose TAO and USDC. With that, the change in 
 - `POST /api/snapshot`: take a snapshot of the tracked wallet now.
 - `GET /api/analytics?wallet=<address>`: fee, APR, IL, portfolio and ledger analytics from stored snapshots. Defaults to the tracked wallet.
 
-## Deploy
+## Deploy (Fly.io)
 
-Set the same environment variables in the hosting project. For a hosted database, set `TRACKER_DB_URL` (and `TRACKER_DB_AUTH_TOKEN`) to a libsql/Turso URL; the default is the local file. The in-process timer only runs while a server is alive, so on serverless hosting call `POST /api/snapshot` from an external scheduler instead.
+The app runs as one always-on machine with the SQLite file on a persistent volume, so the in-process tracker just keeps running. Config is in `fly.toml` and `Dockerfile`.
+
+First time:
+
+```bash
+fly apps create <app-name>
+fly volumes create tracker_data --app <app-name> --region ams --size 1
+fly secrets set --app <app-name> SOLANA_RPC_URL=... SOLANA_RPC_API_KEY=unused \
+  TRACKED_WALLET=... SNAPSHOT_INTERVAL_MINUTES=5 APP_PASSWORD=...
+fly deploy --app <app-name> --ha=false
+```
+
+After that, `fly deploy` ships changes. `APP_PASSWORD` gates every page and API route with HTTP basic auth (any username); `/api/health` stays open for the host's checks. `GET /api/verify` runs the same checks as `npm run verify` against the hosted database. Logs: `fly logs --app <app-name>`.

@@ -93,6 +93,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["positions", "entry_amount_b", "REAL"],
   ["positions", "history_attempts", "INTEGER"],
   ["positions", "deposits_json", "TEXT"], // DepositTx[] from lib/position-history.ts
+  ["positions", "history_withdrawals", "INTEGER"], // collections/withdrawals before the first snapshot
   // Loose (not in a position) strategy-token balances at each run, for the ledger reconciliation.
   ["snapshot_runs", "free_amount_a", "REAL"],
   ["snapshot_runs", "free_amount_b", "REAL"],
@@ -107,7 +108,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
 
 // Cached on globalThis so dev-mode hot reloads reuse one connection. The key
 // carries a version so a schema change re-runs migrations after a reload.
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const globalForDb = globalThis as unknown as Record<string, Promise<Client> | undefined>;
 const DB_KEY = `__trackerDb_v${SCHEMA_VERSION}`;
 
@@ -119,7 +120,7 @@ export function getDb(): Promise<Client> {
 }
 
 async function openDb(): Promise<Client> {
-  const url = process.env.TRACKER_DB_URL ?? DEFAULT_DB_URL;
+  const url = process.env.TRACKER_DB_URL || DEFAULT_DB_URL; // blank means default
   if (url.startsWith("file:")) {
     mkdirSync(path.dirname(path.resolve(url.slice("file:".length))), { recursive: true });
   }
