@@ -51,6 +51,30 @@ const SCHEMA = [
     rewards_json  TEXT NOT NULL,
     raw_json      TEXT NOT NULL
   )`,
+  // Every wallet transaction that moved a strategy token (lib/ledger.ts).
+  `CREATE TABLE IF NOT EXISTS wallet_txs (
+    signature        TEXT PRIMARY KEY,
+    wallet           TEXT NOT NULL,
+    block_time       TEXT NOT NULL,
+    delta_a          REAL NOT NULL,
+    delta_b          REAL NOT NULL,
+    others_json      TEXT NOT NULL,
+    account_keys_json TEXT,
+    kind             TEXT NOT NULL,
+    position_id      TEXT,
+    note             TEXT,
+    price_a          REAL,
+    swap_cost_b      REAL
+  )`,
+  `CREATE INDEX IF NOT EXISTS wallet_txs_wallet_time ON wallet_txs (wallet, block_time)`,
+  // Where the ledger sync left off.
+  `CREATE TABLE IF NOT EXISTS ledger_state (
+    wallet           TEXT PRIMARY KEY,
+    newest_signature TEXT,
+    oldest_signature TEXT,
+    backfill_done    INTEGER NOT NULL DEFAULT 0,
+    updated_at       TEXT
+  )`,
   `CREATE INDEX IF NOT EXISTS snapshots_position_time ON snapshots (position_id, taken_at)`,
   `CREATE INDEX IF NOT EXISTS snapshots_wallet_time ON snapshots (wallet, taken_at)`,
 ];
@@ -69,6 +93,10 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["positions", "entry_amount_b", "REAL"],
   ["positions", "history_attempts", "INTEGER"],
   ["positions", "deposits_json", "TEXT"], // DepositTx[] from lib/position-history.ts
+  // Loose (not in a position) strategy-token balances at each run, for the ledger reconciliation.
+  ["snapshot_runs", "free_amount_a", "REAL"],
+  ["snapshot_runs", "free_amount_b", "REAL"],
+  ["snapshot_runs", "positions_failed", "INTEGER"], // runs with failed fetches are skipped by the reconciliation
   ["snapshots", "tick_lower", "INTEGER"],
   ["snapshots", "tick_upper", "INTEGER"],
   ["snapshots", "liquidity", "TEXT"],
@@ -79,7 +107,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
 
 // Cached on globalThis so dev-mode hot reloads reuse one connection. The key
 // carries a version so a schema change re-runs migrations after a reload.
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 const globalForDb = globalThis as unknown as Record<string, Promise<Client> | undefined>;
 const DB_KEY = `__trackerDb_v${SCHEMA_VERSION}`;
 

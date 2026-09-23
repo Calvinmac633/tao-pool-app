@@ -1,8 +1,10 @@
 import { PublicKey } from "@solana/web3.js";
 import type { InStatement } from "@libsql/client";
 import { getDb } from "./db";
+import { reclassifyLedger, syncLedger } from "./ledger";
 import { lookupPositionOpen } from "./position-history";
 import { fetchWalletPositions, getConnection } from "./raydium";
+import { getStrategyMints } from "./strategy";
 import type { Position, SnapshotSummary, TrackingStatus } from "./types";
 
 export const DEFAULT_INTERVAL_MINUTES = 15;
@@ -95,15 +97,17 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
     args: [takenAt, wallet, ...keep],
   });
 
+  const mints = getStrategyMints();
   statements.push({
-    sql: `UPDATE snapshot_runs SET finished_at = ?, status = 'ok', positions_found = ? WHERE id = ?`,
-    args: [takenAt, result.positions.length, runId],
+    sql: `UPDATE snapshot_runs SET finished_at = ?, status = 'ok', positions_found = ?, positions_failed = ?, free_amount_a = ?, free_amount_b = ? WHERE id = ?`,
+    args: [takenAt, result.positions.length, result.failedPositionIds.length, result.balances[mints.mintA] ?? 0, result.balances[mints.mintB] ?? 0, runId],
   });
 
   const outcomes = await db.batch(statements, "write");
   const closedCount = Number(outcomes[outcomes.length - 2]?.rowsAffected ?? 0);
 
   const historyLookups = await backfillOpenHistory(wallet, result.positions.map((r) => r.position));
+  const ledgerAdded = await updateLedger(wallet, historyLookups > 0);
 
   return {
     runId,
@@ -113,7 +117,24 @@ export async function takeSnapshot(walletAddress: string): Promise<SnapshotSumma
     positionsFailed: result.failedPositionIds.length,
     positionsClosed: closedCount,
     historyLookups,
+    ledgerAdded,
   };
+}
+
+/** Pull new wallet transactions into the ledger. Never fails the snapshot. */
+async function updateLedger(wallet: string, newPositionsFound: boolean): Promise<number> {
+  try {
+    const db = await getDb();
+    const first = await db.execute({ sql: `SELECT MIN(finished_at) AS t FROM snapshot_runs WHERE wallet = ? AND status = 'ok'`, args: [wallet] });
+    const since = first.rows[0]?.t ? new Date(String(first.rows[0].t)).getTime() / 1000 : Date.now() / 1000;
+    const mints = getStrategyMints();
+    const { added } = await syncLedger(getConnection(), wallet, mints.mintA, mints.mintB, since);
+    if (newPositionsFound || added > 0) await reclassifyLedger(wallet);
+    return added;
+  } catch (err) {
+    console.error("Ledger sync failed:", err instanceof Error ? err.message : err);
+    return 0;
+  }
 }
 
 /**

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { PortfolioAnalytics, PositionAnalytics, Projection, WalletAnalytics } from "@/lib/types";
+import type { LedgerEntry, PortfolioAnalytics, PositionAnalytics, Projection, WalletAnalytics } from "@/lib/types";
 import { amount, aprText, formatDate, formatDuration, pct, pctSigned, perDay, perDaySigned, price, usd, usdSigned, WINDOW_SECONDS } from "./format";
 
 const gain = (n: number) => (n >= 0 ? "text-emerald-700 dark:text-emerald-400" : "text-red-600 dark:text-red-400");
@@ -9,7 +9,7 @@ const th = "py-2 pr-4 font-medium";
 const thRight = "py-2 pr-4 text-right font-medium";
 const headRow = "border-b border-neutral-300 text-left text-neutral-600 dark:border-neutral-700 dark:text-neutral-400";
 const bodyRow = "border-b border-neutral-200 dark:border-neutral-800";
-const num = "py-2 pr-4 text-right tabular-nums";
+const num = "py-2 pr-4 text-right tabular-nums whitespace-nowrap";
 
 /** Fees over several windows, shared by the open-positions and overall panels. */
 function WindowsTable({ p, sinceLabel }: { p: PortfolioAnalytics; sinceLabel: string }) {
@@ -226,7 +226,8 @@ function poolTradeText(p: PositionAnalytics, tense: "now" | "close"): string | n
   const verb = t.soldA > 0 ? "sold" : "bought";
   const priceLabel = tense === "now" ? "price now" : "price at close";
   const outcome = t.costUsd < -0.005 ? `costing ${usd(-t.costUsd)}` : "at no cost so far";
-  return `The pool ${verb} ${amount(Math.abs(t.soldA), 3)} ${p.symbolA} for you at an average of ${price(t.avgPrice)} (${priceLabel} ${price(t.lastPrice)}), ${outcome}.`;
+  const realised = p.realisedIlUsd < -0.005 ? ` A further ${usd(-p.realisedIlUsd)} was realised when liquidity was withdrawn earlier.` : "";
+  return `The pool ${verb} ${amount(Math.abs(t.soldA), 3)} ${p.symbolA} for you at an average of ${price(t.avgPrice)} (${priceLabel} ${price(t.lastPrice)}), ${outcome}.${realised}`;
 }
 
 function PositionCard({ p }: { p: PositionAnalytics }) {
@@ -426,7 +427,7 @@ export function ClosedPositionsTable({ positions, total }: { positions: Position
                 <td className={`${num} ${gain(p.ilUsd)}`}>{usdSigned(p.ilUsd)}</td>
                 <td className={`${num} font-medium ${gain(p.netUsd)}`}>{usdSigned(p.netUsd)}</td>
                 <td className={`${num} ${gain(p.priceMoveUsd)}`}>{usdSigned(p.priceMoveUsd)}</td>
-                <td className={`py-2 text-right tabular-nums ${gain(p.totalUsd)}`}>{usdSigned(p.totalUsd)}</td>
+                <td className={`py-2 text-right tabular-nums whitespace-nowrap ${gain(p.totalUsd)}`}>{usdSigned(p.totalUsd)}</td>
               </tr>
             ))}
           </tbody>
@@ -521,5 +522,195 @@ export function OverallPanel({ data }: { data: WalletAnalytics }) {
       <h3 className="mt-6 text-sm font-semibold">Fee rate over time, open and closed together</h3>
       <WindowsTable p={p} sinceLabel="Since tracking" />
     </section>
+  );
+}
+
+// ---- Ledger ----
+
+const kindLabel: Record<LedgerEntry["kind"], string> = { position: "Position", swap: "Swap", external: "Money in/out", unclassified: "Unclassified" };
+
+/** Token amount for the holdings table: two decimals for the stable side, four for the other. */
+const holding = (n: number, isB: boolean) => (isB ? n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : amount(n, 4));
+
+function tokenDelta(n: number, symbol: string): string {
+  if (Math.abs(n) < 1e-9) return "";
+  return `${n > 0 ? "+" : "−"}${amount(Math.abs(n), symbol === "USDC" ? 2 : 4)} ${symbol}`;
+}
+
+/** Holdings, the reconciliation, rolls, and recent activity. */
+export function LedgerPanel({ data, symbolA, symbolB }: { data: WalletAnalytics; symbolA: string; symbolB: string }) {
+  const l = data.ledger;
+  const h = l.holdings;
+  return (
+    <section className="mt-10">
+      <h2 className="text-lg font-semibold">Ledger</h2>
+      <p className="mt-1 text-xs text-neutral-500">
+        Every wallet transaction that moved {symbolA} or {symbolB}, and a check that all changes in your holdings add up.
+        {l.txCount ? ` ${l.txCount} transactions recorded.` : " Nothing recorded yet; the tracker fills this in on its next runs."}
+        {!l.backfillDone && l.txCount > 0 ? " Still loading older history." : ""}
+      </p>
+
+      {h && (
+        <div className="mt-3 overflow-x-auto">
+          <table className="text-sm">
+            <thead>
+              <tr className={headRow}>
+                <th className={th}>Holdings as of {formatDate(h.at)}</th>
+                <th className={thRight}>{symbolA}</th>
+                <th className={thRight}>{symbolB}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className={bodyRow}><td className="py-1 pr-4">In positions</td><td className={num}>{holding(h.posA, false)}</td><td className={num}>{holding(h.posB, true)}</td></tr>
+              <tr className={bodyRow}><td className="py-1 pr-4">Uncollected fees</td><td className={num}>{holding(h.feeA, false)}</td><td className={num}>{holding(h.feeB, true)}</td></tr>
+              <tr className={bodyRow}><td className="py-1 pr-4">Loose in the wallet</td><td className={num}>{holding(h.freeA, false)}</td><td className={num}>{holding(h.freeB, true)}</td></tr>
+              <tr className="font-medium"><td className="py-1 pr-4">Total, worth {usd(h.totalValueB)} at {price(h.priceA)}</td><td className={num}>{holding(h.posA + h.feeA + h.freeA, false)}</td><td className={num}>{holding(h.posB + h.feeB + h.freeB, true)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {l.reconciliations.length > 0 && (
+        <>
+          <h3 className="mt-6 text-sm font-semibold">Does it all add up?</h3>
+          <p className="mt-1 text-xs text-neutral-500">
+            The change in what your {symbolA} and {symbolB} are worth, explained piece by piece. &quot;Unexplained&quot; should stay near zero; if it doesn&apos;t, something moved that the app didn&apos;t understand. Figures in {symbolB}.
+          </p>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={headRow}>
+                  <th className={th}>Window</th>
+                  <th className={thRight}>Change</th>
+                  <th className={thRight}>{symbolA} price move</th>
+                  <th className={thRight}>Fees</th>
+                  <th className={thRight}>Pool cost</th>
+                  <th className={thRight}>Swaps</th>
+                  <th className={thRight}>Money in/out</th>
+                  <th className="py-2 text-right font-medium">Unexplained</th>
+                </tr>
+              </thead>
+              <tbody>
+                {l.reconciliations.map((r) => {
+                  const ok = Math.abs(r.unexplainedB) <= Math.max(2, 0.0005 * Math.max(r.startValueB, r.endValueB));
+                  return (
+                    <tr key={r.label} className={bodyRow}>
+                      <td className="py-2 pr-4">
+                        {r.label}
+                        <div className="text-xs text-neutral-500">{usd(r.startValueB)} → {usd(r.endValueB)}</div>
+                        {r.gapSeconds > 0 && (
+                          <div className="text-xs text-amber-700 dark:text-amber-400">
+                            includes {formatDuration(r.gapSeconds)} with the tracker off; fees collected at closes in that time show under pool cost
+                          </div>
+                        )}
+                      </td>
+                      <td className={`${num} ${gain(r.changeB)}`}>{usdSigned(r.changeB)}</td>
+                      <td className={`${num} ${gain(r.priceMoveB)}`}>{usdSigned(r.priceMoveB)}</td>
+                      <td className={`${num} ${gain(r.feesB)}`}>{usdSigned(r.feesB)}</td>
+                      <td className={`${num} ${gain(r.poolCostB)}`}>{usdSigned(r.poolCostB)}</td>
+                      <td className={`${num} ${gain(r.swapsB)}`}>{usdSigned(r.swapsB)}</td>
+                      <td className={num}>{usdSigned(r.externalB)}</td>
+                      <td className={`py-2 text-right tabular-nums ${ok ? "text-neutral-500" : "font-semibold text-red-600 dark:text-red-400"}`}>
+                        {usdSigned(r.unexplainedB)}
+                        <div className="text-xs font-normal">{ok ? "all explained" : "check activity"}</div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {l.unclassified.length > 0 && (
+        <>
+          <h3 className="mt-6 text-sm font-semibold text-red-600 dark:text-red-400">Unclassified transactions</h3>
+          <p className="mt-1 text-xs text-neutral-500">The app couldn&apos;t tell what these were. They are counted as money in or out until sorted.</p>
+          <ActivityTable entries={l.unclassified} symbolA={symbolA} symbolB={symbolB} />
+        </>
+      )}
+
+      {l.rolls.length > 0 && (
+        <>
+          <h3 className="mt-6 text-sm font-semibold">Rolls</h3>
+          <p className="mt-1 text-xs text-neutral-500">Each time a position closed and the next one opened, with any swaps in between. Swap cost is what the swap lost against the pool price at the time.</p>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className={headRow}>
+                  <th className={th}>Closed</th>
+                  <th className={th}>Reopened</th>
+                  <th className={thRight}>Gap</th>
+                  <th className={thRight}>Swapped</th>
+                  <th className="py-2 text-right font-medium">Swap cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {l.rolls.map((r) => (
+                  <tr key={r.closedAt} className={bodyRow}>
+                    <td className="py-2 pr-4 text-xs">
+                      {formatDate(r.closedAt)}
+                      <div className="font-mono text-neutral-500">{r.closedPositionIds.map((id) => id.slice(0, 8)).join(", ")}</div>
+                    </td>
+                    <td className="py-2 pr-4 text-xs">
+                      {r.openedAt ? formatDate(r.openedAt) : "not yet"}
+                      <div className="font-mono text-neutral-500">{r.openedPositionId?.slice(0, 8)}</div>
+                    </td>
+                    <td className={num}>{r.gapMinutes != null ? formatDuration(r.gapMinutes * 60) : "—"}</td>
+                    <td className={num}>
+                      {r.swaps.length === 0 ? "no swaps" : `${r.netSoldA > 0 ? "sold" : "bought"} ${amount(Math.abs(r.netSoldA), 4)} ${symbolA} in ${r.swaps.length}`}
+                    </td>
+                    <td className={`py-2 text-right tabular-nums ${r.swaps.length ? gain(r.swapCostB) : ""}`}>{r.swaps.length ? usdSigned(r.swapCostB) : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {l.recent.length > 0 && (
+        <>
+          <h3 className="mt-6 text-sm font-semibold">Recent activity</h3>
+          <ActivityTable entries={l.recent} symbolA={symbolA} symbolB={symbolB} />
+        </>
+      )}
+    </section>
+  );
+}
+
+function ActivityTable({ entries, symbolA, symbolB }: { entries: LedgerEntry[]; symbolA: string; symbolB: string }) {
+  return (
+    <div className="mt-2 overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className={headRow}>
+            <th className={th}>When</th>
+            <th className={th}>What</th>
+            <th className={thRight}>{symbolA}</th>
+            <th className={thRight}>{symbolB}</th>
+            <th className="py-2 text-right font-medium">Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e) => (
+            <tr key={e.signature} className={bodyRow}>
+              <td className="py-1 pr-4 whitespace-nowrap text-xs">{formatDate(e.at)}</td>
+              <td className="py-1 pr-4">
+                {kindLabel[e.kind]}
+                <span className="text-xs text-neutral-500"> {e.note}{e.positionId ? ` · ${e.positionId.slice(0, 8)}` : ""}</span>
+              </td>
+              <td className={`py-1 pr-4 text-right tabular-nums ${e.deltaA > 0 ? "text-emerald-700 dark:text-emerald-400" : e.deltaA < 0 ? "text-red-600 dark:text-red-400" : ""}`}>{tokenDelta(e.deltaA, symbolA)}</td>
+              <td className={`py-1 pr-4 text-right tabular-nums ${e.deltaB > 0 ? "text-emerald-700 dark:text-emerald-400" : e.deltaB < 0 ? "text-red-600 dark:text-red-400" : ""}`}>{tokenDelta(e.deltaB, symbolB)}</td>
+              <td className="py-1 text-right text-xs text-neutral-500">
+                {e.kind === "swap" && e.swapCostB != null ? `cost ${usdSigned(e.swapCostB)} vs pool` : ""}
+                {e.others.length ? `${e.others.length} other token${e.others.length > 1 ? "s" : ""}` : ""}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }

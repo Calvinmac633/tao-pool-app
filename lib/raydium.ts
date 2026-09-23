@@ -4,7 +4,7 @@ import { isInRange, tickToPrice } from "./clmm-math";
 import type { Position } from "./types";
 
 // Raydium concentrated-liquidity (CLMM) program on mainnet.
-const CLMM_PROGRAM_ID = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
+export const CLMM_PROGRAM_ID = new PublicKey("CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK");
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const RAYDIUM_POSITION_API = "https://dynamic-ipfs.raydium.io/clmm/position";
@@ -42,6 +42,8 @@ export type WalletPositions = {
   positions: FetchedPosition[];
   /** Verified on-chain positions whose Raydium API request failed this time. */
   failedPositionIds: string[];
+  /** Wallet token balances by mint (human units), from the same account scan. */
+  balances: Record<string, number>;
 };
 
 export function getConnection(): Connection {
@@ -64,21 +66,24 @@ export function getConnection(): Connection {
  * program or Token-2022 depending on which open-position instruction was
  * used, so both programs are scanned.
  */
-async function findCandidateNftMints(connection: Connection, wallet: PublicKey): Promise<PublicKey[]> {
+async function scanTokenAccounts(connection: Connection, wallet: PublicKey): Promise<{ mints: PublicKey[]; balances: Record<string, number> }> {
   const [classic, token2022] = await Promise.all([
     connection.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_PROGRAM_ID }),
     connection.getParsedTokenAccountsByOwner(wallet, { programId: TOKEN_2022_PROGRAM_ID }),
   ]);
 
   const mints: PublicKey[] = [];
+  const balances: Record<string, number> = {};
   for (const { account } of [...classic.value, ...token2022.value]) {
     const info = account.data.parsed?.info;
     const tokenAmount = info?.tokenAmount;
-    if (tokenAmount?.amount === "1" && tokenAmount?.decimals === 0 && typeof info.mint === "string") {
+    if (typeof info?.mint !== "string") continue;
+    if (tokenAmount?.amount === "1" && tokenAmount?.decimals === 0) {
       mints.push(new PublicKey(info.mint));
     }
+    balances[info.mint] = (balances[info.mint] ?? 0) + Number(tokenAmount?.uiAmountString ?? tokenAmount?.uiAmount ?? 0);
   }
-  return mints;
+  return { mints, balances };
 }
 
 /**
@@ -181,7 +186,7 @@ async function fetchPosition({ pda, account }: VerifiedPosition): Promise<Fetche
  */
 export async function fetchWalletPositions(wallet: PublicKey): Promise<WalletPositions> {
   const connection = getConnection();
-  const mints = await findCandidateNftMints(connection, wallet);
+  const { mints, balances } = await scanTokenAccounts(connection, wallet);
   const pdas = mints.map(derivePositionPda);
   const verified = await filterToRealPositions(connection, pdas);
 
@@ -197,5 +202,5 @@ export async function fetchWalletPositions(wallet: PublicKey): Promise<WalletPos
     }
   });
 
-  return { positions, failedPositionIds };
+  return { positions, failedPositionIds, balances };
 }

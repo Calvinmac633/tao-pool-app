@@ -23,7 +23,8 @@ export function startTracker(): void {
       const s = await takeSnapshot(wallet);
       console.log(
         `[tracker] run #${s.runId}: ${s.positionsFound} open, ${s.positionsFailed} failed, ${s.positionsClosed} closed` +
-          (s.historyLookups ? `, ${s.historyLookups} open tx found` : ""),
+          (s.historyLookups ? `, ${s.historyLookups} open tx found` : "") +
+          (s.ledgerAdded ? `, ${s.ledgerAdded} ledger tx added` : ""),
       );
     } catch (err) {
       console.error("[tracker] snapshot failed:", err instanceof Error ? err.message : err);

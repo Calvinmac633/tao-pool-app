@@ -5,6 +5,7 @@
 import { readFileSync } from "node:fs";
 import { getWalletAnalytics } from "../lib/analytics-data";
 import { getTrackedWallet } from "../lib/snapshot";
+import { unexplainedTolerance } from "../lib/ledger-analytics";
 import type { PositionAnalytics } from "../lib/types";
 
 // Load .env.local the way Next does, without overriding real env vars.
@@ -68,6 +69,13 @@ async function main() {
   const d = await getWalletAnalytics(wallet);
   console.log(`wallet ${wallet}, as of ${d.asOf}, ${d.open.length} open, ${d.closed.length} closed shown\n`);
   for (const a of [...d.open, ...d.closed]) checkPosition(a);
+
+  console.log("ledger");
+  for (const r of d.ledger.reconciliations) {
+    check(`holdings reconcile (${r.label})`, Math.abs(r.unexplainedB) <= unexplainedTolerance(r),
+      `change ${f(r.changeB)} = price move ${f(r.priceMoveB)} + fees ${f(r.feesB)} + pool cost ${f(r.poolCostB)} + swaps ${f(r.swapsB)} + in/out ${f(r.externalB)} + unexplained ${f(r.unexplainedB)} over ${r.intervals} intervals`);
+  }
+  check("no unclassified transactions", d.ledger.unclassified.length === 0, `${d.ledger.unclassified.length} unclassified of ${d.ledger.txCount}`);
 
   console.log("portfolio");
   const sum24 = d.open.reduce((s, a) => s + (a.windows["24h"]?.earnedUsd ?? 0), 0);

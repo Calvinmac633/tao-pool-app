@@ -74,12 +74,23 @@ Everything below is computed from stored snapshots, so it only covers time the t
 - **Open time and entry**: when a position is first seen, the app reads its transaction history on-chain (`lib/position-history.ts`). The oldest transaction gives the open time. The wallet's token outflows across every transaction up to the first snapshot, summed, give the deposit, which becomes the IL baseline. Adds after the first snapshot are caught by liquidity changes between snapshots instead. Partial withdrawals before tracking are not subtracted, since from balances alone they look like fee collections; that can only make IL look worse, never better.
 - **Fees of unknown age**: fees showing at a position's first snapshot only count when their age is known: the position opened after the previous snapshot run. A position present at the first ever run, or one that opened during a gap while the tracker was off, has those fees excluded and its figures labelled "since tracking". Assuming unknown age can only understate APR, never inflate it.
 
+### Ledger (`lib/ledger.ts`, `lib/ledger-analytics.ts`)
+
+Every wallet transaction that moved either strategy token (TAO and USDC by default; override with `STRATEGY_MINTS=<mintA>,<mintB>`) is recorded and sorted:
+
+- **position**: touches a tracked position (open, add, withdraw, collect, close).
+- **swap**: TAO and USDC moved in opposite directions and nothing else did.
+- **external**: money in or out of the strategy: other coins bought or sold, transfers, airdrops.
+- **unclassified**: anything else, shown for the user to look at and counted as money in/out meanwhile.
+
+Each run also records the wallet's loose TAO and USDC. With that, the change in total holdings between runs is explained as price move + fees + pool cost + swaps + money in/out, and whatever is left is shown as "unexplained". Rolls (a close, any swaps, the next open) are listed with their swap cost against the pool price. History is filled in back to the first snapshot over the first few runs.
+
 ## API
 
 - `GET /api/positions?wallet=<address>`: open positions and total value.
 - `GET /api/snapshot`: tracker status.
 - `POST /api/snapshot`: take a snapshot of the tracked wallet now.
-- `GET /api/analytics?wallet=<address>`: fee, APR, IL and portfolio analytics from stored snapshots. Defaults to the tracked wallet.
+- `GET /api/analytics?wallet=<address>`: fee, APR, IL, portfolio and ledger analytics from stored snapshots. Defaults to the tracked wallet.
 
 ## Deploy
 

@@ -42,6 +42,7 @@ export type SnapshotSummary = {
   positionsFailed: number;
   positionsClosed: number;
   historyLookups: number; // open-transaction lookups that succeeded this run
+  ledgerAdded: number; // wallet transactions added to the ledger this run
 };
 
 export type TrackingStatus = {
@@ -202,4 +203,66 @@ export type WalletAnalytics = {
   portfolio: PortfolioAnalytics; // every position since tracking began, open and closed
   market: MarketStats;
   history: HistorySummary; // over every closed position, not just the ones listed
+  ledger: LedgerAnalytics;
+};
+
+// ---- Ledger ----
+
+export type LedgerEntry = {
+  signature: string;
+  at: string;
+  kind: "position" | "swap" | "external" | "unclassified";
+  note: string; // position: open / add / withdraw / collect / close; swap: bought A / sold A; external: in / out
+  positionId: string | null;
+  deltaA: number; // wallet's change in token A
+  deltaB: number;
+  others: { mint: string; delta: number }[];
+  priceA: number | null; // pool price near the transaction
+  swapCostB: number | null; // swaps only: value received minus value at the pool price, in B; negative = cost
+};
+
+/** Change in holdings over a window, explained piece by piece. All in token B. */
+export type Reconciliation = {
+  label: string;
+  startAt: string;
+  endAt: string;
+  startValueB: number;
+  endValueB: number;
+  changeB: number;
+  priceMoveB: number;
+  feesB: number;
+  poolCostB: number;
+  swapsB: number;
+  externalB: number; // money in or out of the strategy
+  unexplainedB: number;
+  intervals: number;
+  gapSeconds: number; // time inside intervals much longer than the snapshot cadence (tracker was off)
+};
+
+export type Roll = {
+  closedAt: string; // first close in the roll
+  closedPositionIds: string[]; // every position closed before the next open
+  openedAt: string | null;
+  openedPositionId: string | null;
+  swaps: { at: string; deltaA: number; deltaB: number; priceA: number | null; costB: number | null }[];
+  netSoldA: number; // A sold across the roll's swaps (negative = bought)
+  swapCostB: number;
+  gapMinutes: number | null;
+};
+
+export type LedgerAnalytics = {
+  holdings: {
+    at: string;
+    priceA: number;
+    posA: number; posB: number;
+    feeA: number; feeB: number;
+    freeA: number; freeB: number;
+    totalValueB: number;
+  } | null;
+  reconciliations: Reconciliation[];
+  rolls: Roll[];
+  recent: LedgerEntry[]; // newest first
+  unclassified: LedgerEntry[];
+  txCount: number;
+  backfillDone: boolean;
 };

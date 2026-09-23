@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import type { Position, PositionsResponse, TrackingStatus, WalletAnalytics } from "@/lib/types";
-import { ClosedPositionsTable, OpenPositionCards, OpenPositionsPanel, OverallPanel } from "./analytics-panels";
+import { ClosedPositionsTable, LedgerPanel, OpenPositionCards, OpenPositionsPanel, OverallPanel } from "./analytics-panels";
 import { aprText, formatAgo, formatDate, price, usd, WINDOW_SECONDS } from "./format";
 
 const NETWORK_ERROR = "Couldn't reach the network. Try again.";
@@ -150,6 +150,7 @@ export default function Home() {
           <OpenPositionCards positions={analytics.open} asOf={analytics.asOf} />
           <ClosedPositionsTable positions={analytics.closed} total={analytics.history.closedCount} />
           <OverallPanel data={analytics} />
+          <LedgerPanel data={analytics} symbolA={result?.positions[0]?.symbolA ?? "TAO"} symbolB={result?.positions[0]?.symbolB ?? "USDC"} />
         </>
       )}
     </main>

@@ -2,6 +2,8 @@ import { getDb } from "./db";
 import { analyzePortfolio, analyzePosition, summarizeHistory, type Interval, type PositionRow, type SnapshotRow } from "./analytics";
 import { getIntervalMinutes } from "./snapshot";
 import { dailyVolatility } from "./volatility";
+import { groupRolls, reconcile, totalValueB, type RunTotals } from "./ledger-analytics";
+import type { LedgerAnalytics, LedgerEntry } from "./types";
 import type { PositionAnalytics, WalletAnalytics } from "./types";
 
 const CLOSED_LIMIT = 20;
@@ -9,7 +11,7 @@ const CLOSED_LIMIT = 20;
 /** Load snapshots for a wallet and compute all analytics. */
 export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Promise<WalletAnalytics> {
   const db = await getDb();
-  const [positionsRes, snapshotsRes, runsRes] = await db.batch(
+  const [positionsRes, snapshotsRes, runsRes, ledgerRes, ledgerStateRes] = await db.batch(
     [
       { sql: `SELECT * FROM positions WHERE wallet = ? ORDER BY first_seen_at`, args: [wallet] },
       {
@@ -19,7 +21,9 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
               FROM snapshots WHERE wallet = ? ORDER BY taken_at`,
         args: [wallet],
       },
-      { sql: `SELECT finished_at FROM snapshot_runs WHERE wallet = ? AND status = 'ok' ORDER BY finished_at`, args: [wallet] },
+      { sql: `SELECT finished_at, free_amount_a, free_amount_b, positions_failed FROM snapshot_runs WHERE wallet = ? AND status = 'ok' ORDER BY finished_at`, args: [wallet] },
+      { sql: `SELECT signature, block_time, kind, note, position_id, delta_a, delta_b, others_json, price_a, swap_cost_b FROM wallet_txs WHERE wallet = ? ORDER BY block_time`, args: [wallet] },
+      { sql: `SELECT backfill_done FROM ledger_state WHERE wallet = ?`, args: [wallet] },
     ],
     "read",
   );
@@ -100,6 +104,82 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
   const weight = weighted.reduce((s, a) => s + a.lastUsdValue, 0);
   openPortfolio.expectedCostPerDay = weight > 0 ? weighted.reduce((s, a) => s + a.expectedCostPerDay! * a.lastUsdValue, 0) / weight : null;
 
+  // ---- Ledger: holdings per run, reconciliation, rolls ----
+  const byRun = new Map<number, SnapshotRow[]>();
+  for (const r of rows) {
+    const t = new Date(r.takenAt).getTime() / 1000;
+    byRun.set(t, [...(byRun.get(t) ?? []), r]);
+  }
+  const runTotals: RunTotals[] = [];
+  for (const r of runsRes.rows) {
+    if (r.free_amount_a == null || r.free_amount_b == null) continue; // before balances were recorded
+    if (Number(r.positions_failed ?? 0) > 0) continue; // a position was missing from this run's totals
+    const t = new Date(String(r.finished_at)).getTime() / 1000;
+    const snaps = byRun.get(t) ?? [];
+    const price = snaps[0]?.priceA ?? runTotals[runTotals.length - 1]?.price;
+    if (price == null) continue;
+    runTotals.push({
+      t, price,
+      posA: snaps.reduce((s, x) => s + x.amountA, 0), posB: snaps.reduce((s, x) => s + x.amountB, 0),
+      feeA: snaps.reduce((s, x) => s + x.feeAmountA, 0), feeB: snaps.reduce((s, x) => s + x.feeAmountB, 0),
+      freeA: Number(r.free_amount_a), freeB: Number(r.free_amount_b),
+    });
+  }
+
+  // Name position transactions: the first deposit of a position is its open,
+  // the last withdrawal of a closed position is its close, the rest are adds
+  // and withdrawals or collections.
+  const posById = new Map(positions.map((p) => [p.positionId, p]));
+  const firstDeposit = new Map<string, string>();
+  const lastWithdraw = new Map<string, string>();
+  for (const r of ledgerRes.rows) {
+    if (r.kind !== "position" || r.position_id == null) continue;
+    const pid = String(r.position_id), sig = String(r.signature);
+    if (r.note === "deposit" && !firstDeposit.has(pid)) firstDeposit.set(pid, sig); // rows are in time order
+    if (r.note === "withdraw") lastWithdraw.set(pid, sig);
+  }
+  const ledger: LedgerEntry[] = ledgerRes.rows.map((r) => {
+    let note = String(r.note ?? "");
+    const pid = r.position_id == null ? null : String(r.position_id);
+    if (r.kind === "position" && pid) {
+      const sig = String(r.signature);
+      if (note === "deposit") note = firstDeposit.get(pid) === sig ? "open" : "add";
+      else if (note === "withdraw") note = posById.get(pid)?.closedAt && lastWithdraw.get(pid) === sig ? "close" : "withdraw or collect";
+    }
+    return {
+      signature: String(r.signature),
+      at: String(r.block_time),
+      kind: String(r.kind) as LedgerEntry["kind"],
+      note,
+      positionId: pid,
+      deltaA: Number(r.delta_a),
+      deltaB: Number(r.delta_b),
+      others: safeJson(r.others_json),
+      priceA: r.price_a == null ? null : Number(r.price_a),
+      swapCostB: r.swap_cost_b == null ? null : Number(r.swap_cost_b),
+    };
+  });
+
+  const lastRun = runTotals[runTotals.length - 1];
+  const cadence = getIntervalMinutes() * 60;
+  const reconciliations = [
+    reconcile("24h", runTotals, byRun, ledger, now - 24 * 3600, now, cadence),
+    reconcile("7d", runTotals, byRun, ledger, now - 7 * 24 * 3600, now, cadence),
+    runTotals.length ? reconcile("Since balances were first recorded", runTotals, byRun, ledger, runTotals[0].t, now, cadence) : null,
+  ].filter((x): x is NonNullable<typeof x> => x != null);
+
+  const ledgerAnalytics: LedgerAnalytics = {
+    holdings: lastRun
+      ? { at: new Date(lastRun.t * 1000).toISOString(), priceA: lastRun.price, posA: lastRun.posA, posB: lastRun.posB, feeA: lastRun.feeA, feeB: lastRun.feeB, freeA: lastRun.freeA, freeB: lastRun.freeB, totalValueB: totalValueB(lastRun) }
+      : null,
+    reconciliations,
+    rolls: groupRolls(ledger).slice(0, 20),
+    recent: [...ledger].reverse().slice(0, 40),
+    unclassified: ledger.filter((e) => e.kind === "unclassified").reverse(),
+    txCount: ledger.length,
+    backfillDone: Number(ledgerStateRes.rows[0]?.backfill_done ?? 0) === 1,
+  };
+
   return {
     wallet,
     asOf: rows.length ? rows[rows.length - 1].takenAt : null,
@@ -109,7 +189,17 @@ export async function getWalletAnalytics(wallet: string, nowMs = Date.now()): Pr
     portfolio: analyzePortfolio(intervals, rows, now),
     market: { dailyVol24h: vol24?.dailyVol ?? null, dailyVol7d: vol7d?.dailyVol ?? null, points: pricePoints.length },
     history: summarizeHistory(closed),
+    ledger: ledgerAnalytics,
   };
+}
+
+function safeJson(v: unknown): { mint: string; delta: number }[] {
+  try {
+    const list = JSON.parse(String(v ?? "[]"));
+    return Array.isArray(list) ? list.map((o) => ({ mint: String(o.mint), delta: Number(o.delta) })) : [];
+  } catch {
+    return [];
+  }
 }
 
 function parseDeposits(json: unknown): PositionRow["deposits"] {
